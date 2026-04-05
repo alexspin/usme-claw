@@ -6,8 +6,8 @@
 
 import type { AssemblyMode, AssemblyModeProfile, MemoryTier } from "./types.js";
 
-const ALL_TIERS: MemoryTier[] = ["episodes", "concepts", "skills", "entities"];
-const CORE_TIERS: MemoryTier[] = ["episodes", "concepts", "skills"];
+const ALL_TIERS: MemoryTier[] = ["sensory_trace", "episodes", "concepts", "skills", "entities"];
+const CORE_TIERS: MemoryTier[] = ["sensory_trace", "episodes", "concepts", "skills"];
 const MINIMAL_TIERS: MemoryTier[] = ["concepts", "skills"];
 
 export const MODE_PROFILES: Record<AssemblyMode, AssemblyModeProfile> = {

@@ -1,0 +1,12 @@
+[Unit]
+Description=USME Postgres DB
+After=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash /home/alex/ai/projects/rufus-projects/usme-claw/scripts/start-db.sh
+ExecStop=/home/alex/ai/projects/rufus-projects/usme-claw/scripts/stop-db.sh
+
+[Install]
+WantedBy=default.target

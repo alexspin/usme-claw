@@ -2,7 +2,7 @@
  * Types for the assemble() hot path pipeline.
  */
 
-export type MemoryTier = 'episodes' | 'concepts' | 'skills' | 'entities';
+export type MemoryTier = 'sensory_trace' | 'episodes' | 'concepts' | 'skills' | 'entities';
 
 export interface AssembleRequest {
   query: string;

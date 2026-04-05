@@ -5,44 +5,23 @@
  * is discarded. We record a shadow_comparisons row for later analysis.
  */
 
+import Anthropic from "@anthropic-ai/sdk";
 import type { Pool } from "pg";
-import { insertShadowComparison } from "@usme/core";
-import type { ShadowComparison } from "@usme/core";
-import type { AssembleResult } from "@usme/core/assemble/types.js";
-import type { ShadowConfig } from "./config.js";
+import { appendFileSync, mkdirSync } from "node:fs";
+function dbg(msg: string) { try { mkdirSync("/tmp/usme-debug", { recursive: true }); appendFileSync("/tmp/usme-debug/shadow.log", `[${new Date().toISOString()}] ${msg}\n`); } catch {} }
+import {
+  insertShadowComparison,
+  assemble,
+  embedText,
+  runFactExtraction,
+} from "@usme/core";
+import type { ShadowComparison, AssembleResult } from "@usme/core";
+import type { UsmePluginConfig } from "./config.js";
 
 export interface AgentMessage {
   role: string;
   content: string;
   [key: string]: unknown;
-}
-
-export interface ShadowRunInput {
-  sessionId: string;
-  turnIndex: number;
-  queryPreview: string;
-  lcmMessages: AgentMessage[];
-  lcmLatencyMs: number;
-}
-
-export interface ShadowAssembleResult {
-  assembleResult: AssembleResult;
-  latencyMs: number;
-}
-
-/**
- * Run USME assemble() in shadow mode alongside LCM.
- * If assemble throws, logs the error and returns null (graceful degradation).
- */
-export async function runShadowAssemble(
-  assembleFn: () => Promise<ShadowAssembleResult>,
-): Promise<ShadowAssembleResult | null> {
-  try {
-    return await assembleFn();
-  } catch (err) {
-    console.error("[usme-shadow] assemble() failed, degrading gracefully:", err);
-    return null;
-  }
 }
 
 /**
@@ -79,58 +58,100 @@ function estimateTokens(messages: AgentMessage[]): number {
 }
 
 /**
+ * Run USME assemble() in shadow mode alongside LCM.
+ * If assemble throws, logs the error and returns null (graceful degradation).
+ */
+export async function runShadowAssemble(
+  pool: Pool,
+  config: UsmePluginConfig,
+  sessionId: string,
+  messages: AgentMessage[],
+): Promise<AssembleResult | null> {
+  try {
+    const lastUserMessage = [...messages].reverse().find((m) => m.role === "user");
+    if (!lastUserMessage || !lastUserMessage.content) return null;
+
+    const queryEmbedding = await embedText(lastUserMessage.content, config.embeddingApiKey);
+
+    const request = {
+      query: lastUserMessage.content,
+      sessionId,
+      conversationHistory: messages,
+      mode: config.assembly.defaultMode,
+      tokenBudget: (config.assembly.modes as Record<string, { tokenBudget: number }>)[config.assembly.defaultMode].tokenBudget,
+      turnIndex: messages.length,
+    };
+
+    const assembleResult = await assemble(request, { pool, queryEmbedding });
+
+    await recordShadowComparison(pool, sessionId, messages, assembleResult);
+
+    // Fire-and-forget extraction: serialize the last user message and extract facts
+    dbg(`extraction check: enabled=${config.extraction.enabled} embeddingApiKey=${config.embeddingApiKey ? "SET("+config.embeddingApiKey.slice(0,8)+"...)" : "MISSING"}`);
+    if (config.extraction.enabled) {
+      const anthropicKey = process.env.ANTHROPIC_API_KEY ?? "";
+      dbg(`ANTHROPIC_API_KEY=${anthropicKey ? "SET" : "MISSING"}`);
+      if (anthropicKey) {
+        setImmediate(() => {
+          dbg(`setImmediate fired`);
+          const anthropicClient = new Anthropic({ apiKey: anthropicKey });
+          const serialized = messages
+            .slice(-4) // last ~2 turns for context
+            .map((m) => `[${m.role}]: ${m.content}`)
+            .join("\n\n");
+          runFactExtraction(anthropicClient, pool, {
+            sessionId,
+            turnIndex: messages.length,
+            serializedTurn: serialized,
+          }, { model: config.extraction.model, embeddingApiKey: config.embeddingApiKey }).catch((err) => {
+            console.error("[usme-shadow] extraction failed:", err);
+          });
+        });
+      }
+    }
+
+    return assembleResult;
+  } catch (err) {
+    console.error("[usme-shadow] assemble() failed, degrading gracefully:", err);
+    return null;
+  }
+}
+
+/**
  * Record a shadow comparison row after a turn completes.
  */
 export async function recordShadowComparison(
   pool: Pool,
-  input: ShadowRunInput,
-  usmeResult: ShadowAssembleResult | null,
-  config: ShadowConfig,
+  sessionId: string,
+  messages: AgentMessage[],
+  usmeResult: AssembleResult | null,
 ): Promise<void> {
-  if (!config.logComparison) return;
-  if (Math.random() > config.samplingRate) return;
+  const lcmTokenCount = estimateTokens(messages);
 
-  const lcmTokenCount = estimateTokens(input.lcmMessages);
-
-  const usmeContent = usmeResult?.assembleResult.items.map((i) => i.content) ?? [];
-  const lcmContent = input.lcmMessages.map((m) =>
+  const usmeContent = usmeResult?.items.map((i) => i.content) ?? [];
+  const lcmContent = messages.map((m) =>
     typeof m.content === "string" ? m.content : "",
   );
 
   const overlapScore = usmeResult ? computeOverlapScore(usmeContent, lcmContent) : null;
 
-  const usmeTokenCount = usmeResult?.assembleResult.metadata.tokensUsed ?? null;
-  const tokenDelta = usmeTokenCount != null ? usmeTokenCount - lcmTokenCount : null;
-
-  const tiersContributed = usmeResult
-    ? usmeResult.assembleResult.metadata.tiersQueried
-    : null;
-
-  const usmeOnlyPreview = usmeContent.length > 0
-    ? usmeContent[0].substring(0, 200)
-    : null;
-
-  const lcmOnlyPreview = lcmContent.length > 0
-    ? lcmContent[0].substring(0, 200)
-    : null;
-
   const cmp: Omit<ShadowComparison, "id" | "created_at"> = {
-    session_id: input.sessionId,
-    turn_index: input.turnIndex,
-    query_preview: input.queryPreview.substring(0, 200),
+    session_id: sessionId,
+    turn_index: messages.length,
+    query_preview: ([...messages].reverse().find((m) => m.role === "user")?.content ?? "").slice(0, 200) || null,
     lcm_token_count: lcmTokenCount,
-    lcm_latency_ms: input.lcmLatencyMs,
-    usme_token_count: usmeTokenCount,
-    usme_latency_ms: usmeResult?.latencyMs ?? null,
-    usme_mode: usmeResult?.assembleResult.metadata.mode ?? null,
-    usme_tiers_contributed: tiersContributed,
-    usme_items_selected: usmeResult?.assembleResult.metadata.itemsSelected ?? null,
-    usme_items_considered: usmeResult?.assembleResult.metadata.itemsConsidered ?? null,
+    lcm_latency_ms: null,
+    usme_token_count: usmeResult?.metadata.tokensUsed ?? 0,
+    usme_latency_ms: usmeResult?.metadata.durationMs ?? null,
+    usme_mode: usmeResult?.metadata.mode ?? null,
+    usme_tiers_contributed: usmeResult?.metadata.tiersQueried ?? null,
+    usme_items_selected: usmeResult?.metadata.itemsSelected ?? null,
+    usme_items_considered: usmeResult?.metadata.itemsConsidered ?? null,
     usme_system_addition_tokens: null,
-    token_delta: tokenDelta,
+    token_delta: usmeResult ? (usmeResult.metadata.tokensUsed - lcmTokenCount) : null,
     overlap_score: overlapScore,
-    usme_only_preview: usmeOnlyPreview,
-    lcm_only_preview: lcmOnlyPreview,
+    usme_only_preview: usmeContent.length > 0 ? usmeContent[0].substring(0, 200) : null,
+    lcm_only_preview: lcmContent.length > 0 ? lcmContent[0].substring(0, 200) : null,
     usme_relevance_score: null,
     usme_memory_cited: null,
     relevance_analysis_done: false,

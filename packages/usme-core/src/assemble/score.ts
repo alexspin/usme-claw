@@ -26,6 +26,7 @@ const SKILL_WEIGHTS = {
 
 /** Recency half-lives per tier in days. */
 const HALF_LIFE_DAYS: Record<MemoryTier, number> = {
+  sensory_trace: 1,
   episodes: 7,
   concepts: 90,
   skills: Infinity,

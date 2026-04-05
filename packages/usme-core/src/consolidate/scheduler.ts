@@ -5,7 +5,7 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import type pg from "pg";
-import { runNightlyConsolidation } from "./nightly.js";
+import { runNightlyConsolidation, stepEpisodify } from "./nightly.js";
 import type { NightlyConfig, NightlyResult } from "./nightly.js";
 
 // ── Types ──────────────────────────────────────────────────
@@ -15,6 +15,10 @@ export interface SchedulerConfig extends NightlyConfig {
   cronExpression?: string;
   /** If true, run immediately on start before scheduling. */
   runOnStart?: boolean;
+  /** Interval in ms for mini-consolidation (sensory_trace → episodes). Default: 30 minutes. */
+  miniConsolidationIntervalMs?: number;
+  /** Number of turns between mini-consolidations. Default: 50. */
+  miniConsolidationTurnThreshold?: number;
 }
 
 export interface SchedulerHandle {
@@ -22,6 +26,8 @@ export interface SchedulerHandle {
   stop: () => void;
   /** Run the nightly job immediately (outside schedule). */
   runNow: () => Promise<NightlyResult>;
+  /** Run mini-consolidation (sensory_trace → episodes) immediately. */
+  runMiniNow: () => Promise<number>;
 }
 
 // ── Logger ─────────────────────────────────────────────────
@@ -79,8 +85,22 @@ export function startScheduler(
   config: SchedulerConfig = {},
 ): SchedulerHandle {
   const cronExpr = config.cronExpression ?? "0 3 * * *";
+  const miniIntervalMs = config.miniConsolidationIntervalMs ?? 30 * 60_000; // 30 min
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let miniTimer: ReturnType<typeof setInterval> | null = null;
   let stopped = false;
+
+  const runMini = async (): Promise<number> => {
+    log.info("Running mini-consolidation (sensory_trace → episodes)");
+    try {
+      const count = await stepEpisodify(client, pool, { ...config, tracesPerBatch: 100 });
+      log.info(`Mini-consolidation: created ${count} episodes`);
+      return count;
+    } catch (err) {
+      log.error("Mini-consolidation failed", err);
+      return 0;
+    }
+  };
 
   const runJob = async (): Promise<NightlyResult> => {
     log.info("Running nightly consolidation job");
@@ -115,6 +135,11 @@ export function startScheduler(
 
   scheduleNext();
 
+  // Start mini-consolidation interval
+  miniTimer = setInterval(() => {
+    if (!stopped) runMini().catch(() => {});
+  }, miniIntervalMs);
+
   return {
     stop: () => {
       stopped = true;
@@ -122,8 +147,13 @@ export function startScheduler(
         clearTimeout(timer);
         timer = null;
       }
+      if (miniTimer) {
+        clearInterval(miniTimer);
+        miniTimer = null;
+      }
       log.info("Scheduler stopped");
     },
     runNow: runJob,
+    runMiniNow: runMini,
   };
 }

@@ -10,20 +10,18 @@ import {
   getPool,
   closePool,
   insertSensoryTrace,
-} from "@usme/core";
-import {
+  embedText,
   assemble as coreAssemble,
   type AssembleRequest,
   type AssembleOptions,
   type InjectedMemory,
-} from "@usme/core/assemble/index.js";
+} from "@usme/core";
 
 import { resolveConfig, type UsmePluginConfig } from "./config.js";
 import {
   runShadowAssemble,
   recordShadowComparison,
   type AgentMessage,
-  type ShadowAssembleResult,
 } from "./shadow.js";
 
 // ── ContextEngine interface types ────────────────────────────
@@ -158,8 +156,8 @@ function injectedToSystemAddition(items: InjectedMemory[]): string {
   ].join("\n");
 }
 
-/** Placeholder embedding generator (returns zero vector). */
-function placeholderEmbedding(): number[] {
+/** Zero vector fallback for empty queries or missing API key. */
+function zeroEmbedding(): number[] {
   return new Array(1536).fill(0);
 }
 
@@ -179,7 +177,7 @@ export function createUsmeEngine(
       pool = getPool({
         connectionString: connString,
         max: config.db.poolMax,
-        idleTimeoutMs: config.db.idleTimeoutMs,
+        idleTimeoutMillis: config.db.idleTimeoutMs,
       });
     }
     return pool;
@@ -229,6 +227,22 @@ export function createUsmeEngine(
           episodified_at: null,
           expires_at: null,
         });
+        // Non-blocking embed-after-insert
+        const content = typeof message.content === "string" ? message.content : JSON.stringify(message.content);
+        const p2 = getDbPool();
+        setImmediate(async () => {
+          try {
+            if (!config.embeddingApiKey) return;
+            const vec = await embedText(content, config.embeddingApiKey);
+            await p2.query(
+              "UPDATE sensory_trace SET embedding = $1 WHERE id = $2",
+              [`[${vec.join(",")}]`, itemId],
+            );
+          } catch (err) {
+            console.error("[usme] embed-after-insert failed:", err);
+          }
+        });
+
         return { ok: true, itemId };
       } catch (err) {
         console.error("[usme] ingest failed:", err);
@@ -269,7 +283,7 @@ export function createUsmeEngine(
         return { messages, estimatedTokens: 0 };
       }
 
-      const budget = tokenBudget ?? config.assembly.modes[config.assembly.defaultMode].tokenBudget;
+      const budget = tokenBudget ?? (config.assembly.modes as Record<string, { tokenBudget: number }>)[config.assembly.defaultMode].tokenBudget;
       const mode = config.assembly.defaultMode;
       const turnIndex = turnIndexFromMessages(messages);
 
@@ -292,31 +306,14 @@ export function createUsmeEngine(
 
       const assembleOptions: AssembleOptions = {
         pool: getDbPool(),
-        queryEmbedding: placeholderEmbedding(),
+        queryEmbedding: query && config.embeddingApiKey
+          ? await embedText(query, config.embeddingApiKey)
+          : zeroEmbedding(),
       };
 
       // Shadow mode: run concurrently but discard output
       if (config.mode === "shadow") {
-        const lcmLatencyStart = performance.now();
-        const shadowResult = await runShadowAssemble(async () => {
-          const start = performance.now();
-          const result = await coreAssemble(assembleRequest, assembleOptions);
-          return { assembleResult: result, latencyMs: performance.now() - start };
-        });
-
-        const lcmLatencyMs = performance.now() - lcmLatencyStart;
-        await recordShadowComparison(
-          getDbPool(),
-          {
-            sessionId,
-            turnIndex,
-            queryPreview: query.substring(0, 200),
-            lcmMessages: messages,
-            lcmLatencyMs,
-          },
-          shadowResult,
-          config.shadow,
-        );
+        await runShadowAssemble(getDbPool(), config, sessionId, messages);
 
         // In shadow mode, return original messages unmodified
         return { messages, estimatedTokens: 0 };

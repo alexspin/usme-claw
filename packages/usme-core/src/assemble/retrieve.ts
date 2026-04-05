@@ -42,6 +42,19 @@ async function withTimeout<T>(promise: Promise<T[]>, ms: number): Promise<T[]> {
 }
 
 const TIER_QUERIES: Record<MemoryTier, string> = {
+  sensory_trace: `
+    SELECT id, 'sensory_trace' AS tier, content, embedding,
+           length(content) / 4 AS token_count, created_at,
+           provenance_kind, utility_prior, 1.0 AS confidence,
+           true AS is_active, 0 AS access_count, NULL AS last_accessed,
+           NULL AS teachability,
+           1 - (embedding <=> $1::vector) AS similarity
+    FROM sensory_trace
+    WHERE embedding IS NOT NULL
+      AND (expires_at IS NULL OR expires_at > now())
+    ORDER BY embedding <=> $1::vector
+    LIMIT $2
+  `,
   episodes: `
     SELECT id, 'episodes' AS tier, summary AS content, embedding, token_count,
            created_at, 'user' AS provenance_kind, 'medium' AS utility_prior,

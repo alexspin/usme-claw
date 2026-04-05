@@ -2,7 +2,7 @@
  * Configuration schema for the USME OpenClaw plugin.
  */
 
-import type { AssemblyMode } from "@usme/core/assemble/types.js";
+import type { AssemblyMode } from "@usme/core";
 
 export type PluginMode = "shadow" | "active" | "disabled";
 
@@ -49,6 +49,7 @@ export interface UsmePluginConfig {
   consolidation: ConsolidationConfig;
   assembly: AssemblyConfig;
   shadow: ShadowConfig;
+  embeddingApiKey: string;
 }
 
 export const DEFAULT_CONFIG: UsmePluginConfig = {
@@ -64,7 +65,7 @@ export const DEFAULT_CONFIG: UsmePluginConfig = {
   },
   extraction: {
     enabled: true,
-    model: "claude-haiku",
+    model: "claude-haiku-4-5",
   },
   consolidation: {
     cron: "0 3 * * *",
@@ -84,6 +85,7 @@ export const DEFAULT_CONFIG: UsmePluginConfig = {
     logComparison: true,
     samplingRate: 1.0,
   },
+  embeddingApiKey: process.env.OPENAI_API_KEY ?? "",
 };
 
 export function resolveConfig(
@@ -107,5 +109,6 @@ export function resolveConfig(
       },
     },
     shadow: { ...DEFAULT_CONFIG.shadow, ...partial.shadow },
+    embeddingApiKey: partial.embeddingApiKey ?? DEFAULT_CONFIG.embeddingApiKey,
   };
 }

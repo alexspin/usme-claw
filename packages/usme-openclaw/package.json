@@ -1,5 +1,5 @@
 {
-  "name": "@usme/openclaw",
+  "name": "usme-claw",
   "version": "0.1.0",
   "type": "module",
   "main": "dist/plugin.js",
@@ -8,7 +8,13 @@
     "build": "tsc",
     "test": "vitest run"
   },
+  "openclaw": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.82.0",
     "@usme/core": "*"
   }
 }

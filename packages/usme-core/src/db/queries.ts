@@ -1,4 +1,5 @@
 import type pg from "pg";
+import { appendFileSync, mkdirSync } from "node:fs";
 import type {
   SensoryTrace,
   Episode,
@@ -9,27 +10,44 @@ import type {
   ShadowComparison,
 } from "../schema/types.js";
 
+function dbg(msg: string) {
+  try { mkdirSync("/tmp/usme-debug", { recursive: true }); appendFileSync("/tmp/usme-debug/queries.log", `[${new Date().toISOString()}] ${msg}\n`); } catch {}
+}
+
+/** Format a number[] embedding as pgvector literal, or null. */
+function vecLiteral(embedding: number[] | null | undefined): string | null {
+  return embedding ? `[${embedding.join(",")}]` : null;
+}
+
 // ── Sensory Traces ──────────────────────────────────────────
 
 export async function insertSensoryTrace(
   pool: pg.Pool,
   trace: Omit<SensoryTrace, "id" | "created_at">,
 ): Promise<string> {
-  const { rows } = await pool.query(
-    `INSERT INTO sensory_trace
-       (session_id, turn_index, item_type, memory_type, content, embedding,
-        provenance_kind, provenance_ref, utility_prior, tags, extractor_ver,
-        metadata, expires_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-     RETURNING id`,
-    [
-      trace.session_id, trace.turn_index, trace.item_type, trace.memory_type,
-      trace.content, trace.embedding, trace.provenance_kind, trace.provenance_ref,
-      trace.utility_prior, trace.tags, trace.extractor_ver, trace.metadata,
-      trace.expires_at,
-    ],
-  );
-  return rows[0].id;
+  const vec = vecLiteral(trace.embedding);
+  dbg(`insertSensoryTrace: session=${trace.session_id} turn=${trace.turn_index} hasEmbedding=${!!vec} vecLen=${trace.embedding?.length ?? 0}`);
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO sensory_trace
+         (session_id, turn_index, item_type, memory_type, content, embedding,
+          provenance_kind, provenance_ref, utility_prior, tags, extractor_ver,
+          metadata, expires_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+       RETURNING id`,
+      [
+        trace.session_id, trace.turn_index, trace.item_type, trace.memory_type,
+        trace.content, vec, trace.provenance_kind, trace.provenance_ref,
+        trace.utility_prior, trace.tags, trace.extractor_ver, trace.metadata,
+        trace.expires_at,
+      ],
+    );
+    dbg(`insertSensoryTrace: OK id=${rows[0].id}`);
+    return rows[0].id;
+  } catch (err) {
+    dbg(`insertSensoryTrace: CAUGHT ERROR: ${err}`);
+    throw err;
+  }
 }
 
 export async function getUnepisodifiedTraces(
@@ -70,7 +88,7 @@ export async function insertEpisode(
      RETURNING id`,
     [
       episode.session_ids, episode.time_bucket, episode.summary,
-      episode.embedding, episode.source_trace_ids, episode.token_count,
+      vecLiteral(episode.embedding), episode.source_trace_ids, episode.token_count,
       episode.utility_score, episode.metadata,
     ],
   );
@@ -91,7 +109,7 @@ export async function insertConcept(
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
      RETURNING id`,
     [
-      concept.concept_type, concept.content, concept.embedding,
+      concept.concept_type, concept.content, vecLiteral(concept.embedding),
       concept.utility_score, concept.provenance_kind, concept.provenance_ref,
       concept.confidence, concept.supersedes_id, concept.superseded_by,
       concept.is_active, concept.tags, concept.metadata,
@@ -124,7 +142,7 @@ export async function insertSkill(
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
      RETURNING id`,
     [
-      skill.name, skill.description, skill.embedding, skill.status,
+      skill.name, skill.description, vecLiteral(skill.embedding), skill.status,
       skill.skill_path, skill.source_episode_ids, skill.teachability,
       skill.metadata,
     ],
@@ -142,7 +160,7 @@ export async function insertEntity(
     `INSERT INTO entities (name, entity_type, canonical, embedding, confidence, metadata)
      VALUES ($1,$2,$3,$4,$5,$6)
      RETURNING id`,
-    [entity.name, entity.entity_type, entity.canonical, entity.embedding, entity.confidence, entity.metadata],
+    [entity.name, entity.entity_type, entity.canonical, vecLiteral(entity.embedding), entity.confidence, entity.metadata],
   );
   return rows[0].id;
 }
@@ -184,8 +202,8 @@ export async function insertShadowComparison(
      RETURNING id`,
     [
       cmp.session_id, cmp.turn_index, cmp.query_preview,
-      cmp.lcm_token_count, cmp.lcm_latency_ms,
-      cmp.usme_token_count, cmp.usme_latency_ms, cmp.usme_mode,
+      cmp.lcm_token_count, cmp.lcm_latency_ms != null ? Math.round(cmp.lcm_latency_ms) : null,
+      cmp.usme_token_count, cmp.usme_latency_ms != null ? Math.round(cmp.usme_latency_ms) : null, cmp.usme_mode,
       cmp.usme_tiers_contributed, cmp.usme_items_selected, cmp.usme_items_considered,
       cmp.usme_system_addition_tokens,
       cmp.token_delta, cmp.overlap_score, cmp.usme_only_preview, cmp.lcm_only_preview,
