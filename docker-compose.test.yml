@@ -1,0 +1,11 @@
+services:
+  db-test:
+    image: timescale/timescaledb-ha:pg16
+    environment:
+      POSTGRES_DB: usme_test
+      POSTGRES_USER: usme
+      POSTGRES_PASSWORD: usme_test
+    ports:
+      - "5433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data

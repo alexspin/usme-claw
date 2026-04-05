@@ -1,0 +1,249 @@
+Use the ruflo MCP swarm to build USME (usme-claw) — a TypeScript monorepo
+implementing a context engine plugin for OpenClaw.
+
+Environment notes:
+- Working directory: /home/alex/ai/projects/rufus-projects/usme-claw/
+- Git is already initialized — do NOT run git init
+- Node: v25.8.1 (node:sqlite built-in available)
+- Docker + Docker Compose available
+- OpenClaw SDK at: /home/alex/ai/projects/node_modules/openclaw/
+- PM docs at: /home/alex/ai/projects/rufus-projects/usme/pm/
+  - Read ARCHITECTURE.md, PRD.md, DECISIONS.md before doing anything else
+  - ARCHITECTURE.md is the single source of truth for design decisions
+
+---
+
+MANDATORY STARTUP — your very first response must do all three of these things
+at once, in a single message. Do not split them across multiple messages or
+agents will run sequentially instead of in parallel.
+
+1. Initialize the swarm using the ruflo MCP tool (swarm_init), with hierarchical
+   topology, 8 agents max, and specialized strategy.
+
+2. Create a todo list with all agent tasks in one batch — one TodoWrite call
+   covering every agent.
+
+3. Spawn every agent at the same time using the Task tool, each with
+   run_in_background set to true. All Task calls go in this same first message.
+
+---
+
+DASHBOARD OBSERVABILITY — mandatory for every agent, no exceptions:
+
+Before starting:
+  memory_store("plan:<agent-name>", "<what I'll do> | <files I'll create> | ~<N> min")
+
+After completing:
+  memory_store("done:<agent-name>", "<one line: what changed>")
+
+Only if blocked:
+  memory_store("blocked:<agent-name>", "<what's blocking me>")
+
+Examples:
+  memory_store("plan:architect", "reading PM docs + resolving open decisions | docs/design.md | ~15 min")
+  memory_store("done:architect", "design.md written with all open decisions resolved")
+  memory_store("plan:coder-storage", "Postgres schema + DDL + Docker Compose | packages/usme-core/db/ | ~20 min")
+
+Log all decisions to swarm memory namespace "usme".
+
+---
+
+REQUIREMENTS
+
+Build the usme-claw monorepo — a TypeScript plugin for OpenClaw that replaces
+the default LCM context engine with a relevance-based memory system.
+
+The full spec is in /home/alex/ai/projects/rufus-projects/usme/pm/ARCHITECTURE.md.
+Read it. Every agent must read the relevant sections before touching code.
+
+Key locked decisions (do not revisit without flagging):
+- Storage: Postgres 16 + TimescaleDB + pgvector (Docker Compose)
+- Driver: node-postgres (pg) with connection pooling
+- Extraction: async Haiku/Flash per-turn (non-blocking)
+- Nightly consolidation: Sonnet via cron
+- Repo structure: monorepo, two packages — usme-core + usme-openclaw
+- Shadow mode: USME runs alongside LCM (LCM stays active), logs what it would inject.
+  Promotion = one-way flip from shadow to active. LCM never needs to run in shadow.
+- No budget constraint on extraction LLM calls (Haiku/Flash)
+- assemble() return type: resolve D3 from ARCHITECTURE.md section 10 by reading the
+  OpenClaw contextEngine slot interface at:
+  /home/alex/ai/projects/node_modules/openclaw/ (SDK source)
+
+Open decisions (D1-D27 in ARCHITECTURE.md section 10) are for the architect to resolve
+before coding starts. Swarm markers in the doc flag where decisions are needed.
+
+---
+
+AGENT INSTRUCTIONS
+
+coordinator:
+  Run: npx claude-flow@v3alpha hooks session-start
+  memory_store("plan:coordinator", "gating agent sequencing via memory polling | none | ongoing")
+
+  Your job: gate later agents on earlier agents' "done:" keys.
+  Poll for "done:architect" before releasing storage, hotpath, asyncpath, and adapter coders.
+  Poll for "done:coder-storage" before releasing coder-hotpath.
+  Poll for all "done:coder-*" keys before releasing tester.
+
+  Report final status when tester completes.
+  memory_store("done:coordinator", "all agents complete — build finished")
+
+architect:
+  memory_store("plan:architect", "reading PM docs + resolving D1-D27 open decisions + writing implementation spec | docs/design.md | ~15 min")
+
+  Steps:
+  1. Read ALL of /home/alex/ai/projects/rufus-projects/usme/pm/ARCHITECTURE.md
+  2. Read /home/alex/ai/projects/node_modules/openclaw/docs/ — find the contextEngine
+     slot interface. Identify the exact method signatures and return types USME must implement.
+  3. Resolve every Swarm-flagged decision in the architecture doc. Write your reasoning.
+  4. Write /home/alex/ai/projects/rufus-projects/usme-claw/docs/design.md with:
+     - Resolved open decisions (D1-D27) with brief rationale
+     - Final assemble() return type (critical: must match OpenClaw's contextEngine interface)
+     - Monorepo structure (exact directory tree)
+     - Package names, TypeScript config, build tooling choice
+     - Database schema (final DDL for all tables, including shadow_comparisons)
+     - Selection formula implementation sketch (types + scoring function signature)
+     - Extraction prompt structure (TypeScript types for extracted items)
+     - Shadow mode harness design (how it plugs into the adapter)
+     - Test setup (runner choice, docker-compose.test.yml outline)
+  5. memory_store("done:architect", "design.md complete — all decisions resolved")
+
+coder-storage:
+  Wait for "done:architect" via memory polling before starting.
+  memory_store("plan:coder-storage", "Postgres schema + migrations + Docker Compose | packages/usme-core/db/ | ~20 min")
+
+  Read docs/design.md (written by architect) before touching anything.
+
+  Implement:
+  - docker-compose.yml (Postgres 16 + TimescaleDB + pgvector)
+  - docker-compose.test.yml (ephemeral DB for tests — wipe on exit)
+  - packages/usme-core/db/migrations/ — all DDL as numbered migration files
+    Tables: sensory_trace (hypertable), episodes, concepts, skills,
+            entities, entity_relationships, shadow_comparisons
+  - packages/usme-core/src/db/ — connection pool setup, query helpers
+  - scripts/db-init.sh — runs migrations + seeds dev data
+  - TypeScript types for all DB rows
+
+  Use node-pg-migrate for migrations (unless architect chose differently).
+
+  memory_store("done:coder-storage", "schema + migrations + Docker Compose complete")
+
+coder-hotpath:
+  Wait for "done:architect" AND "done:coder-storage" via memory polling.
+  memory_store("plan:coder-hotpath", "assemble() hot path — retrieve, score, critic, pack | packages/usme-core/src/assemble/ | ~25 min")
+
+  Read docs/design.md before touching anything.
+
+  Implement packages/usme-core/src/assemble/:
+  - retrieve.ts — ANN vector search across memory tiers (pgvector HNSW)
+  - score.ts — weighted formula: semantic similarity + recency decay + provenance + access_frequency
+  - critic.ts — critic gate: filter discard/low-confidence/injection-risk items
+  - pack.ts — greedy token-budget packing, respects mode (tight/extended/ephemeral)
+  - modes.ts — psycho-genius / brilliant / smart-efficient parameter sets
+  - index.ts — assemble(query, budget, mode) returning AssembleResult
+
+  The hot path must never write to the DB. It is read-only at runtime.
+  P95 latency target: 150ms max. Keep the implementation lean.
+
+  memory_store("done:coder-hotpath", "assemble() hot path complete")
+
+coder-asyncpath:
+  Wait for "done:architect" AND "done:coder-storage" via memory polling.
+  memory_store("plan:coder-asyncpath", "extraction pipeline + nightly consolidation | packages/usme-core/src/extract/ + consolidate/ | ~25 min")
+
+  Read docs/design.md before touching anything.
+
+  Implement:
+  packages/usme-core/src/extract/:
+  - extractor.ts — Haiku/Flash API call, async, non-blocking. Structured output:
+    {type: fact|preference|decision|question|plan|anomaly|ephemeral,
+     content: string, provenance: string, utility_estimate: high|medium|low|discard, tags: string[]}
+  - prompts/ — versioned extraction prompt files (user-turn + assistant-turn variants)
+  - queue.ts — in-process queue for post-turn extraction jobs
+  - entity-extractor.ts — named entity + relationship extraction (runs alongside fact extraction)
+
+  packages/usme-core/src/consolidate/:
+  - nightly.ts — 5-step nightly job (see ARCHITECTURE.md section 5):
+    1. cluster sensory_trace into episode summaries (Sonnet)
+    2. promote recurring patterns into concepts (Sonnet)
+    3. contradiction resolution + entity updates (Sonnet)
+    4. skill candidate drafting (Sonnet/Opus)
+    5. decay utility scores + prune expired traces
+  - scheduler.ts — cron setup for nightly job
+
+  memory_store("done:coder-asyncpath", "extraction pipeline + nightly job complete")
+
+coder-adapter:
+  Wait for "done:architect" AND "done:coder-hotpath" via memory polling.
+  memory_store("plan:coder-adapter", "OpenClaw plugin adapter + shadow mode harness + CLI tooling | packages/usme-openclaw/src/ | ~25 min")
+
+  Read docs/design.md before touching anything.
+  Read /home/alex/ai/projects/node_modules/openclaw/ SDK source — understand
+  the contextEngine plugin slot interface exactly.
+
+  Implement packages/usme-openclaw/src/:
+  - plugin.ts — contextEngine slot implementation. Must implement exactly:
+    bootstrap(), ingest(), ingestBatch(), afterTurn(), assemble(), compact(),
+    prepareSubagentSpawn(), onSubagentEnded(), dispose()
+    Set ownsCompaction: true in plugin info.
+  - config.ts — OpenClaw config schema for usme-claw plugin:
+    mode: shadow | active | disabled
+    db: host/port/database/user/password/pool
+    extraction: model (haiku|flash), enabled
+    consolidation: cron, sonnetModel, skillDraftingModel, candidatesPerNight
+    assembly: defaultMode, modes (psycho-genius/brilliant/smart-efficient)
+    shadow: logComparison, samplingRate
+  - shadow.ts — shadow mode harness:
+    On each turn (shadow mode): run USME assemble() concurrently with LCM,
+    write shadow_comparisons row, discard USME output (LCM serves the turn)
+    Graceful degradation: if assemble() throws, log error + return LCM output
+
+  scripts/ (CLI tooling — hard v1 requirement):
+  - shadow-report.ts — per-session and global shadow comparison report
+  - shadow-tail.ts — live tail of shadow_comparisons table
+  - shadow-ready.ts — promotion readiness check (runs all criteria, pass/fail with evidence)
+  - shadow-analyze.ts — run relevance analysis on completed turns
+
+  memory_store("done:coder-adapter", "OpenClaw adapter + shadow harness + CLI scripts complete")
+
+tester:
+  Wait for "done:coder-hotpath", "done:coder-asyncpath", "done:coder-adapter"
+  via memory polling before starting.
+  memory_store("plan:tester", "vitest unit + integration tests + shadow tests | packages/*/tests/ | ~20 min")
+
+  Read docs/design.md and existing source before writing tests.
+
+  Unit tests (packages/usme-core/tests/unit/):
+  - selection-formula.test.ts — packing algo: given scored items + budget, verify correct selection
+  - recency-decay.test.ts — decay at t=0, t=half_life, t=3*half_life
+  - entity-dedup.test.ts — merge: exact match vs near-miss vs false positive
+  - critic-gate.test.ts — exclusion of discard/low-confidence/soft-deleted items
+
+  Integration tests (packages/usme-core/tests/integration/):
+  - assemble-roundtrip.test.ts — insert test data, call assemble(), verify AssembleResult shape
+  - extraction-pipeline.test.ts — simulate a turn, verify sensory_trace rows written
+  - entity-dedup-live.test.ts — insert entity, re-extract same entity, verify no duplicate
+
+  Shadow mode tests (packages/usme-openclaw/tests/):
+  - shadow-comparison.test.ts — verify shadow_comparisons row written per turn
+  - graceful-degradation.test.ts — if assemble() throws, verify adapter returns LCM output
+
+  Setup:
+  - Use vitest (ESM-native, fast — unless architect chose jest with good reason)
+  - docker-compose.test.yml for DB (wipe on test complete)
+  - vitest.config.ts in each package
+
+  Run the tests. Fix anything that fails.
+
+  memory_store("done:tester", "all tests pass — test count: N unit, M integration, K shadow")
+
+---
+
+After all agents complete:
+1. npm install (workspace root)
+2. Run tests: npm test
+3. Verify docker-compose.yml starts cleanly: docker compose up -d && sleep 5 && docker compose ps
+4. git add -A && git commit -m "feat: usme-claw v0.1.0 — initial build"
+
+Do not touch .openclaw/, or the openclaw workspace root.
+Do NOT run git init — already configured.

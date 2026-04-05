@@ -1,0 +1,13 @@
+services:
+  db:
+    image: timescale/timescaledb-ha:pg16
+    environment:
+      POSTGRES_DB: usme
+      POSTGRES_USER: usme
+      POSTGRES_PASSWORD: usme_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - usme_data:/var/lib/postgresql/data
+volumes:
+  usme_data:

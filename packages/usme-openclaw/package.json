@@ -1,0 +1,14 @@
+{
+  "name": "@usme/openclaw",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/plugin.js",
+  "types": "dist/plugin.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@usme/core": "*"
+  }
+}
