@@ -71,7 +71,9 @@ export async function runShadowAssemble(
     const lastUserMessage = [...messages].reverse().find((m) => m.role === "user");
     if (!lastUserMessage || !lastUserMessage.content) return null;
 
+    dbg(`embedText for query: "${lastUserMessage.content.slice(0,80)}" apiKey=${config.embeddingApiKey ? "SET" : "MISSING"}`);
     const queryEmbedding = await embedText(lastUserMessage.content, config.embeddingApiKey);
+    dbg(`embedText OK: dimensions=${queryEmbedding?.length}`);
 
     const request = {
       query: lastUserMessage.content,
@@ -82,9 +84,11 @@ export async function runShadowAssemble(
       turnIndex: messages.length,
     };
 
+    dbg(`assemble() calling with mode=${request.mode} budget=${request.tokenBudget}`);
     const assembleResult = await assemble(request, { pool, queryEmbedding });
+    dbg(`assemble() OK: selected=${assembleResult.metadata.itemsSelected} considered=${assembleResult.metadata.itemsConsidered} tiers=${assembleResult.metadata.tiersQueried}`);
 
-    await recordShadowComparison(pool, sessionId, messages, assembleResult);
+    await recordShadowComparison(pool, sessionId, messages, assembleResult, lastUserMessage.content);
 
     // Fire-and-forget extraction: serialize the last user message and extract facts
     dbg(`extraction check: enabled=${config.extraction.enabled} embeddingApiKey=${config.embeddingApiKey ? "SET("+config.embeddingApiKey.slice(0,8)+"...)" : "MISSING"}`);
@@ -112,6 +116,7 @@ export async function runShadowAssemble(
 
     return assembleResult;
   } catch (err) {
+    dbg(`runShadowAssemble CAUGHT ERROR: ${err instanceof Error ? err.stack : err}`);
     console.error("[usme-shadow] assemble() failed, degrading gracefully:", err);
     return null;
   }
@@ -125,6 +130,7 @@ export async function recordShadowComparison(
   sessionId: string,
   messages: AgentMessage[],
   usmeResult: AssembleResult | null,
+  lastUserContent?: string,
 ): Promise<void> {
   const lcmTokenCount = estimateTokens(messages);
 
@@ -138,7 +144,7 @@ export async function recordShadowComparison(
   const cmp: Omit<ShadowComparison, "id" | "created_at"> = {
     session_id: sessionId,
     turn_index: messages.length,
-    query_preview: ([...messages].reverse().find((m) => m.role === "user")?.content ?? "").slice(0, 200) || null,
+    query_preview: lastUserContent?.slice(0, 200) ?? null,
     lcm_token_count: lcmTokenCount,
     lcm_latency_ms: null,
     usme_token_count: usmeResult?.metadata.tokensUsed ?? 0,
