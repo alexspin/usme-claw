@@ -436,15 +436,22 @@ npm install
 npm run build
 ```
 
-### 2. Start the database
+### 2. Configure environment
 
 ```bash
-./scripts/start-db.sh
+cp .env.example .env
+# Edit .env — fill in OPENAI_API_KEY and ANTHROPIC_API_KEY at minimum
 ```
 
-This starts a `timescale/timescaledb-ha:pg16` Docker container named `usme-db` on port 5432. The script is idempotent — it creates, starts, or restarts the container as needed, then polls until Postgres is ready.
+### 3. Start the database
 
-Default credentials (override via `DATABASE_URL`):
+```bash
+npm run db:start
+```
+
+Starts `timescale/timescaledb-ha:pg16` via Docker Compose (container name `usme-db`, port 5432) and waits for the healthcheck to pass. The container is configured with `restart: unless-stopped` so it survives reboots.
+
+Default credentials (from `.env`, falls back to hardcoded defaults):
 ```
 host:     localhost
 port:     5432
@@ -453,27 +460,36 @@ user:     usme
 password: usme_dev
 ```
 
-### 3. Run migrations
+### 4. Run migrations
 
 ```bash
-./scripts/db-init.sh
+npm run db:migrate
 ```
 
-Applies all 8 migrations in `packages/usme-core/src/db/migrations/`. Creates tables, HNSW indexes, shadow comparison table, and unique constraints.
+Applies all migrations in `packages/usme-core/src/db/migrations/` via `node-pg-migrate`. Creates tables, HNSW indexes, shadow comparison table, and unique constraints.
 
-Or with a custom database URL:
+Custom database URL:
 ```bash
-DATABASE_URL=postgres://usme:secret@localhost:5432/usme ./scripts/db-init.sh
+DATABASE_URL=postgres://usme:secret@localhost:5432/usme npm run db:migrate
 ```
 
-### 4. Set environment variables
+**Other DB commands:**
+```bash
+npm run db:stop          # Stop the container
+npm run db:reset         # Wipe volume, restart, re-migrate (destructive)
+npm run db:migrate:test  # Run migrations against the test DB (port 5433)
+```
+
+### 5. Set environment variables
+
+The `.env` file is loaded by Docker Compose automatically. For the Node process (migrations, scripts, plugin), either source it or set vars directly:
 
 ```bash
 export OPENAI_API_KEY=sk-...           # Required: embeddings
 export ANTHROPIC_API_KEY=sk-ant-...    # Required: extraction + consolidation
 ```
 
-### 5. Build
+### 6. Build
 
 ```bash
 npm run build
@@ -481,7 +497,7 @@ npm run build
 
 TypeScript compilation for all packages. Output goes to `dist/` in each package.
 
-### 6. Verify
+### 7. Verify
 
 ```bash
 # Check shadow log (requires OpenClaw integration to be running)
