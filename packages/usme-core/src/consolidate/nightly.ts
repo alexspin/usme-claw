@@ -185,8 +185,9 @@ export async function stepPromote(
     ],
   });
 
-  const text =
-    response.content[0].type === "text" ? response.content[0].text : "{}";
+  const text = stripJsonFences(
+    response.content[0].type === "text" ? response.content[0].text : "{}"
+  );
 
   let concepts: Array<{
     concept_type: string;
@@ -197,7 +198,7 @@ export async function stepPromote(
   }> = [];
 
   try {
-    const parsed = JSON.parse(text);
+    const parsed = JSON.parse(stripJsonFences(text));
     concepts = parsed.concepts ?? [];
   } catch {
     log.error("Step 2: Failed to parse concept promotion response");
@@ -395,13 +396,14 @@ export async function stepSkillDraft(
     ],
   });
 
-  const text =
-    response.content[0].type === "text" ? response.content[0].text : "{}";
+  const text = stripJsonFences(
+    response.content[0].type === "text" ? response.content[0].text : "{}"
+  );
 
   let skills: Array<{ name: string; description: string; teachability: number }> = [];
 
   try {
-    const parsed = JSON.parse(text);
+    const parsed = JSON.parse(stripJsonFences(text));
     skills = parsed.skills ?? [];
   } catch {
     log.error("Step 4: Failed to parse skill drafting response");
@@ -536,6 +538,10 @@ export async function runNightlyConsolidation(
 }
 
 // ── Helpers ────────────────────────────────────────────────
+
+function stripJsonFences(text: string): string {
+  return text.replace(/^\s*```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "").trim();
+}
 
 function chunkArray<T>(arr: T[], k: number): T[][] {
   const chunkSize = Math.ceil(arr.length / k);

@@ -436,12 +436,12 @@ export function createUsmeEngine(
         const anthropicClient = new Anthropic({ apiKey: anthropicKey });
         const serialized = messages
           .filter((m) => m.role === "user" || m.role === "assistant")
-          .slice(-4) // last ~2 turns for context
           .map((m) => {
             const text = stripMetadataEnvelope(extractText(m.content));
             return text.length >= 10 ? `[${m.role}]: ${text}` : null;
           })
           .filter((s): s is string => s !== null)
+          .slice(-4)
           .join("\n\n");
         runFactExtraction(anthropicClient, getDbPool(), {
           sessionId,

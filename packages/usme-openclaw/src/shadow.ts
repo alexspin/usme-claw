@@ -103,7 +103,6 @@ export async function runShadowAssemble(
           const anthropicClient = new Anthropic({ apiKey: anthropicKey });
           const serialized = messages
             .filter((m) => m.role === "user" || m.role === "assistant")
-            .slice(-4) // last ~2 turns for context
             .map((m) => {
               const text = stripMetadataEnvelope(
                 typeof m.content === "string"
@@ -127,6 +126,7 @@ export async function runShadowAssemble(
               return text.length >= 10 ? `[${m.role}]: ${text}` : null;
             })
             .filter((s): s is string => s !== null)
+            .slice(-4) // last 4 non-empty messages — slice AFTER filtering so empty tool results don't consume the window
             .join("\n\n");
           runFactExtraction(anthropicClient, pool, {
             sessionId,

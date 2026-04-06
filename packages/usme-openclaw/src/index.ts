@@ -6,7 +6,9 @@
  * fire-and-forget alongside it, recording shadow comparisons.
  */
 
-import { getPool, closePool } from "@usme/core";
+import Anthropic from "@anthropic-ai/sdk";
+import { getPool, closePool, startScheduler } from "@usme/core";
+import type { SchedulerHandle } from "@usme/core";
 import { resolveConfig } from "./config.js";
 import { runShadowAssemble } from "./shadow.js";
 
@@ -35,6 +37,25 @@ export default function usmePlugin(api: {
     max: config.db.poolMax,
     idleTimeoutMillis: config.db.idleTimeoutMs,
   });
+
+  const anthropicKey = process.env.ANTHROPIC_API_KEY ?? "";
+  const openaiKey = process.env.OPENAI_API_KEY ?? "";
+  let schedulerHandle: SchedulerHandle | null = null;
+
+  if (anthropicKey) {
+    const anthropicClient = new Anthropic({ apiKey: anthropicKey });
+    schedulerHandle = startScheduler(anthropicClient, pool, {
+      sonnetModel: config.consolidation.sonnetModel,
+      opusModel: config.consolidation.skillDraftingModel,
+      embeddingApiKey: openaiKey,
+      cronExpression: config.consolidation.cron,
+      miniConsolidationIntervalMs: 30 * 60_000,
+      runOnStart: false,
+    });
+    api.logger.info(`[usme] consolidation scheduler started`);
+  } else {
+    api.logger.warn("[usme] no Anthropic key — consolidation scheduler disabled");
+  }
 
   api.on(
     "before_prompt_build",
@@ -68,7 +89,10 @@ export default function usmePlugin(api: {
   api.registerService?.({
     id: "usme-pool",
     start: () => {},
-    stop: async () => closePool(),
+    stop: async () => {
+      schedulerHandle?.stop();
+      await closePool();
+    },
   });
 
   api.logger.info(
