@@ -141,6 +141,18 @@ export interface ContextEngine {
 
 // ── Helpers ──────────────────────────────────────────────────
 
+/** Unwrap Anthropic content block arrays to plain text. */
+function extractText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((b): b is { type: string; text: string } => b && typeof b === "object" && b.type === "text")
+      .map((b) => b.text)
+      .join("\n");
+  }
+  return String(content ?? "");
+}
+
 /** Derive a turn index from the messages array length. */
 function turnIndexFromMessages(messages: AgentMessage[]): number {
   return messages.filter((m) => m.role === "user").length;
@@ -420,7 +432,7 @@ export function createUsmeEngine(
         const anthropicClient = new Anthropic({ apiKey: anthropicKey });
         const serialized = messages
           .slice(-4) // last ~2 turns for context
-          .map((m) => `[${m.role}]: ${stripMetadataEnvelope(typeof m.content === "string" ? m.content : String(m.content))}`)
+          .map((m) => `[${m.role}]: ${stripMetadataEnvelope(extractText(m.content))}`)
           .join("\n\n");
         runFactExtraction(anthropicClient, getDbPool(), {
           sessionId,
