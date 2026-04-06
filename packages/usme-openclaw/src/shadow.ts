@@ -102,8 +102,31 @@ export async function runShadowAssemble(
           dbg(`setImmediate fired`);
           const anthropicClient = new Anthropic({ apiKey: anthropicKey });
           const serialized = messages
+            .filter((m) => m.role === "user" || m.role === "assistant")
             .slice(-4) // last ~2 turns for context
-            .map((m) => `[${m.role}]: ${stripMetadataEnvelope(typeof m.content === "string" ? m.content : String(m.content))}`)
+            .map((m) => {
+              const text = stripMetadataEnvelope(
+                typeof m.content === "string"
+                  ? m.content
+                  : Array.isArray(m.content)
+                    ? (m.content as Array<{type?: string; text?: string; content?: unknown}>)
+                        .flatMap(function extractBlocks(b): string[] {
+                          if (!b || typeof b !== "object") return [];
+                          if (b.type === "text" && typeof b.text === "string") return [b.text];
+                          if (b.content) {
+                            const inner = b.content;
+                            return Array.isArray(inner)
+                              ? inner.flatMap(extractBlocks)
+                              : typeof inner === "string" ? [inner] : [];
+                          }
+                          return [];
+                        })
+                        .join("\n")
+                    : ""
+              );
+              return text.length >= 10 ? `[${m.role}]: ${text}` : null;
+            })
+            .filter((s): s is string => s !== null)
             .join("\n\n");
           runFactExtraction(anthropicClient, pool, {
             sessionId,

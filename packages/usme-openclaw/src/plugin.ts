@@ -437,9 +437,11 @@ export function createUsmeEngine(
         const serialized = messages
           .filter((m) => m.role === "user" || m.role === "assistant")
           .slice(-4) // last ~2 turns for context
-          .map((m) => ({ role: m.role, text: stripMetadataEnvelope(extractText(m.content)) }))
-          .filter(({ text }) => text.length >= 10)
-          .map(({ role, text }) => `[${role}]: ${text}`)
+          .map((m) => {
+            const text = stripMetadataEnvelope(extractText(m.content));
+            return text.length >= 10 ? `[${m.role}]: ${text}` : null;
+          })
+          .filter((s): s is string => s !== null)
           .join("\n\n");
         runFactExtraction(anthropicClient, getDbPool(), {
           sessionId,
