@@ -144,16 +144,59 @@ function turnIndexFromMessages(messages: AgentMessage[]): number {
 /** Convert InjectedMemory[] items into a system prompt addition. */
 function injectedToSystemAddition(items: InjectedMemory[]): string {
   if (items.length === 0) return "";
-  const lines = items.map(
-    (item) => `[${item.tier}/${item.id.substring(0, 8)}] ${item.content}`,
-  );
+  const lines: string[] = [];
+  for (const item of items) {
+    const dateStr = item.createdAt instanceof Date
+      ? item.createdAt.toISOString().slice(0, 10)
+      : String(item.createdAt).slice(0, 10);
+    const relevance = item.score >= 0.75 ? "high" : item.score >= 0.50 ? "med" : "low";
+    let header = `[${item.tier} | ${dateStr} | relevance:${relevance}`;
+    if (item.tags && item.tags.length > 0) {
+      header += ` | tags:${item.tags.join(",")}`;
+    }
+    header += "]";
+    lines.push(header);
+    lines.push(item.content);
+    lines.push("");
+  }
+  // Remove trailing blank line
+  if (lines[lines.length - 1] === "") lines.pop();
   return [
     "<usme-context>",
-    "The following relevant context was retrieved from memory:",
+    "Relevant memories retrieved for this turn:",
     "",
     ...lines,
     "</usme-context>",
   ].join("\n");
+}
+
+// ── LCM transform registration ────────────────────────────────
+
+// ORDERING: memtx registers transforms at startup; USME registers here (per-session bootstrap)
+// so USME always runs after memtx in the transform chain. Do not move this registration to module init.
+
+const LCM_TRANSFORM_KEY = '__rufus_lcm_context_transforms';
+const USME_TRANSFORM_REGISTERED_KEY = '__usme_transform_registered';
+
+type LcmTransformFn = (sessionId: string, msgs: unknown[]) => Promise<unknown[] | null>;
+
+function registerLcmTransform(id: string, fn: LcmTransformFn): void {
+  const g = globalThis as Record<string, unknown>;
+  if (!Array.isArray(g[LCM_TRANSFORM_KEY])) {
+    g[LCM_TRANSFORM_KEY] = [];
+  }
+  const transforms = g[LCM_TRANSFORM_KEY] as Array<{ id: string; fn: LcmTransformFn }>;
+  const idx = transforms.findIndex((t) => t.id === id);
+  if (idx >= 0) transforms.splice(idx, 1);
+  transforms.push({ id, fn });
+  g[LCM_TRANSFORM_KEY] = transforms.map((t) => t.fn);
+}
+
+function registerUsmeTransformOnce(fn: LcmTransformFn): void {
+  const g = globalThis as Record<string, unknown>;
+  if (g[USME_TRANSFORM_REGISTERED_KEY]) return;
+  g[USME_TRANSFORM_REGISTERED_KEY] = true;
+  registerLcmTransform('usme-inject', fn);
 }
 
 /** Zero vector fallback for empty queries or missing API key. */
@@ -197,6 +240,78 @@ export function createUsmeEngine(
         // Verify connectivity
         await p.query("SELECT 1");
         console.log(`[usme] bootstrapped for session ${sessionId}, mode=${config.mode}`);
+
+        // Register LCM context transform (per-session bootstrap, after pool is ready)
+        const usmeInjectTransform: LcmTransformFn = async (
+          _sessionId: string,
+          msgs: unknown[],
+        ): Promise<unknown[] | null> => {
+          const timeoutPromise = new Promise<null>((resolve) =>
+            setTimeout(() => resolve(null), 150),
+          );
+          const workPromise = (async (): Promise<unknown[] | null> => {
+            try {
+              // Find the last user message
+              const lastUserMsg = [...(msgs as Array<{ role: string; content?: unknown }>)]
+                .reverse()
+                .find((m) => m.role === "user");
+              if (!lastUserMsg) return null;
+
+              const query = typeof lastUserMsg.content === "string"
+                ? lastUserMsg.content
+                : JSON.stringify(lastUserMsg.content ?? "");
+              if (!query) return null;
+
+              const queryEmbedding = config.embeddingApiKey
+                ? await embedText(query, config.embeddingApiKey)
+                : zeroEmbedding();
+
+              const mode = config.assembly.defaultMode;
+              const budget = (config.assembly.modes as Record<string, { tokenBudget: number }>)[mode].tokenBudget;
+
+              const assembleRequest: AssembleRequest = {
+                query,
+                sessionId: _sessionId,
+                conversationHistory: msgs,
+                mode,
+                tokenBudget: budget,
+                turnIndex: (msgs as Array<{ role: string }>).filter((m) => m.role === "user").length,
+              };
+
+              const assembleOptions: AssembleOptions = {
+                pool: getDbPool(),
+                queryEmbedding,
+              };
+
+              const result = await coreAssemble(assembleRequest, assembleOptions);
+              if (!result.items || result.items.length === 0) return null;
+
+              const contextBlock = injectedToSystemAddition(result.items);
+
+              // Fire-and-forget shadow comparison
+              void recordShadowComparison(
+                getDbPool(),
+                _sessionId,
+                msgs as AgentMessage[],
+                result,
+                query,
+              ).catch(() => {/* ignore */});
+
+              // Append as new user message at end
+              return [
+                ...msgs,
+                { role: "user", content: contextBlock },
+              ];
+            } catch {
+              return null;
+            }
+          })();
+
+          return Promise.race([workPromise, timeoutPromise]);
+        };
+
+        registerUsmeTransformOnce(usmeInjectTransform);
+
         return { ok: true };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

@@ -19,6 +19,10 @@ export interface InjectedMemory {
   content: string;
   score: number;
   tokenCount: number;
+  /** When this memory item was originally stored. */
+  createdAt: Date;
+  /** Semantic tags from the source row. Empty array when none. */
+  tags: string[];
 }
 
 export interface AssembleResult {
@@ -52,6 +56,8 @@ export interface RetrievalCandidate {
   lastAccessed: Date | null;
   /** Only present for skills tier. */
   teachability: number | null;
+  /** Semantic labels attached to this memory item. Empty array when not available. */
+  tags: string[];
 }
 
 export interface ScoredCandidate extends RetrievalCandidate {

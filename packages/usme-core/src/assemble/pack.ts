@@ -23,6 +23,8 @@ export function pack(candidates: ScoredCandidate[], budget: number): InjectedMem
         content: item.content,
         score: item.score,
         tokenCount: item.tokenCount,
+        createdAt: item.createdAt,
+        tags: item.tags,
       });
       remaining -= item.tokenCount;
     }

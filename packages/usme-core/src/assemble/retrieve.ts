@@ -48,6 +48,7 @@ const TIER_QUERIES: Record<MemoryTier, string> = {
            provenance_kind, utility_prior, 1.0 AS confidence,
            true AS is_active, 0 AS access_count, NULL AS last_accessed,
            NULL AS teachability,
+           COALESCE(tags, '{}') AS tags,
            1 - (embedding <=> $1::vector) AS similarity
     FROM sensory_trace
     WHERE embedding IS NOT NULL
@@ -129,11 +130,21 @@ async function queryTier(
     accessCount: Number(r.access_count),
     lastAccessed: r.last_accessed ? new Date(r.last_accessed as string) : null,
     teachability: r.teachability != null ? Number(r.teachability) : null,
+    tags: tier === 'sensory_trace' ? parseTagsArray(r.tags) : [],
   }));
 }
 
 function parseEmbedding(raw: unknown): number[] {
   if (Array.isArray(raw)) return raw as number[];
   if (typeof raw === "string") return JSON.parse(raw) as number[];
+  return [];
+}
+
+function parseTagsArray(raw: unknown): string[] {
+  if (Array.isArray(raw)) return raw as string[];
+  if (typeof raw === 'string' && raw.startsWith('{')) {
+    // Postgres array literal: {a,b,c}
+    return raw.slice(1, -1).split(',').filter(Boolean);
+  }
   return [];
 }
