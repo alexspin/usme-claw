@@ -5,6 +5,7 @@
  * usme-core library to the OpenClaw plugin system.
  */
 
+import Anthropic from "@anthropic-ai/sdk";
 import type { Pool } from "pg";
 import {
   getPool,
@@ -12,9 +13,13 @@ import {
   insertSensoryTrace,
   embedText,
   assemble as coreAssemble,
+  runFactExtraction,
+  startScheduler,
+  stripMetadataEnvelope,
   type AssembleRequest,
   type AssembleOptions,
   type InjectedMemory,
+  type SchedulerHandle,
 } from "@usme/core";
 
 import { resolveConfig, type UsmePluginConfig } from "./config.js";
@@ -213,6 +218,7 @@ export function createUsmeEngine(
 ): ContextEngine {
   const config = resolveConfig(userConfig);
   let pool: Pool | null = null;
+  let schedulerHandle: SchedulerHandle | null = null;
 
   function getDbPool(): Pool {
     if (!pool) {
@@ -240,6 +246,30 @@ export function createUsmeEngine(
         // Verify connectivity
         await p.query("SELECT 1");
         console.log(`[usme] bootstrapped for session ${sessionId}, mode=${config.mode}`);
+
+        // Start consolidation scheduler if not disabled
+        if (config.mode !== "disabled" && !schedulerHandle) {
+          const anthropicKey = process.env.ANTHROPIC_API_KEY ?? "";
+          if (anthropicKey) {
+            const anthropicClient = new Anthropic({ apiKey: anthropicKey });
+            const schedulerConfig = {
+              cronExpression: config.consolidation.cron,
+              sonnetModel: config.consolidation.sonnetModel,
+              opusModel: config.consolidation.skillDraftingModel,
+            };
+            schedulerHandle = startScheduler(anthropicClient, getDbPool(), schedulerConfig);
+            const { getNextCronRunISO } = (() => {
+              const parts = schedulerConfig.cronExpression.trim().split(/\s+/);
+              const targetMin = parseInt(parts[0], 10) || 0;
+              const targetHour = parseInt(parts[1], 10) || 3;
+              const next = new Date();
+              next.setUTCHours(targetHour, targetMin, 0, 0);
+              if (next.getTime() <= Date.now()) next.setUTCDate(next.getUTCDate() + 1);
+              return { getNextCronRunISO: () => next.toISOString() };
+            })();
+            console.log(`[usme] consolidation scheduler started, next run: ${getNextCronRunISO()}`);
+          }
+        }
 
         // Register LCM context transform (per-session bootstrap, after pool is ready)
         const usmeInjectTransform: LcmTransformFn = async (
@@ -381,15 +411,23 @@ export function createUsmeEngine(
       if (config.mode === "disabled") return;
       if (!config.extraction.enabled) return;
 
-      // Enqueue async extraction (non-blocking, fire-and-forget)
+      const anthropicKey = process.env.ANTHROPIC_API_KEY ?? "";
+      if (!anthropicKey) return;
+
+      // Fire-and-forget fact extraction (non-blocking)
       setImmediate(() => {
-        // In v1, extraction runs in-process via setImmediate.
-        // The actual extraction logic lives in usme-core/extract.
-        // For now, just log the intent; the extraction worker will
-        // pick up un-extracted verbatim traces from the DB.
-        console.log(
-          `[usme] afterTurn: enqueued extraction for session=${sessionId}, turns=${messages.length}`,
-        );
+        const anthropicClient = new Anthropic({ apiKey: anthropicKey });
+        const serialized = messages
+          .slice(-4) // last ~2 turns for context
+          .map((m) => `[${m.role}]: ${stripMetadataEnvelope(typeof m.content === "string" ? m.content : String(m.content))}`)
+          .join("\n\n");
+        runFactExtraction(anthropicClient, getDbPool(), {
+          sessionId,
+          turnIndex: messages.length,
+          serializedTurn: serialized,
+        }, { model: config.extraction.model, embeddingApiKey: config.embeddingApiKey }).catch((err) => {
+          console.error("[usme] afterTurn extraction failed:", err);
+        });
       });
     },
 
@@ -489,6 +527,10 @@ export function createUsmeEngine(
 
     async dispose() {
       console.log("[usme] disposing plugin, closing DB pool");
+      if (schedulerHandle) {
+        schedulerHandle.stop();
+        schedulerHandle = null;
+      }
       await closePool();
       pool = null;
     },

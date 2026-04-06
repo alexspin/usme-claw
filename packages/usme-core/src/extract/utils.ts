@@ -1,0 +1,14 @@
+/**
+ * Strips OpenClaw routing metadata from message content before fact extraction.
+ * Removes:
+ *   - "Sender (untrusted metadata):\n```json\n{...}\n```\n\n" blocks
+ *   - Leading "[Day YYYY-MM-DD HH:MM UTC] " timestamp lines
+ */
+export function stripMetadataEnvelope(content: string): string {
+  let s = content;
+  // Strip "Sender (untrusted metadata): ... ``` fence" block
+  s = s.replace(/^Sender \(untrusted metadata\):[\s\S]*?```\n\n?/m, '');
+  // Strip leading timestamp line: [Mon 2026-04-06 15:21 UTC]
+  s = s.replace(/^\[\w{3} \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC\] /, '');
+  return s.trim();
+}

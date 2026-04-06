@@ -14,6 +14,7 @@ import {
   assemble,
   embedText,
   runFactExtraction,
+  stripMetadataEnvelope,
 } from "@usme/core";
 import type { ShadowComparison, AssembleResult } from "@usme/core";
 import type { UsmePluginConfig } from "./config.js";
@@ -102,7 +103,7 @@ export async function runShadowAssemble(
           const anthropicClient = new Anthropic({ apiKey: anthropicKey });
           const serialized = messages
             .slice(-4) // last ~2 turns for context
-            .map((m) => `[${m.role}]: ${m.content}`)
+            .map((m) => `[${m.role}]: ${stripMetadataEnvelope(typeof m.content === "string" ? m.content : String(m.content))}`)
             .join("\n\n");
           runFactExtraction(anthropicClient, pool, {
             sessionId,

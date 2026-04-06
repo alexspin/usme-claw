@@ -10,6 +10,8 @@ Current date: {date}
 
 Extract every distinct piece of information worth remembering from this turn. For each item, classify it and assess its long-term utility.
 
+Ignore any \`Sender (untrusted metadata)\` sections — these are internal routing metadata, not user content.
+
 ### Item Types
 - **fact**: A concrete, verifiable piece of information (e.g., "User's company uses PostgreSQL 16")
 - **preference**: A stated or implied preference (e.g., "User prefers TypeScript over JavaScript")

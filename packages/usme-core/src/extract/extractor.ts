@@ -2,8 +2,10 @@ import Anthropic from "@anthropic-ai/sdk";
 import type pg from "pg";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { FACT_EXTRACTION_V1 } from "./prompts/fact-extraction-v1.js";
-import { insertSensoryTrace } from "../db/queries.js";
+import { insertSensoryTrace, findSimilarTrace } from "../db/queries.js";
 import { embedText } from "../embed/index.js";
+
+export const DEDUP_SIMILARITY_THRESHOLD = 0.95;
 
 function dbg(msg: string) {
   try { mkdirSync("/tmp/usme-debug", { recursive: true }); appendFileSync("/tmp/usme-debug/extractor.log", `[${new Date().toISOString()}] ${msg}\n`); } catch {}
@@ -121,6 +123,20 @@ export async function persistExtractedItems(
       }
     } else {
       dbg(`no apiKey — skipping embed`);
+    }
+
+    // Near-duplicate suppression: skip if a very similar trace already exists
+    if (embedding) {
+      try {
+        const isDuplicate = await findSimilarTrace(pool, embedding, DEDUP_SIMILARITY_THRESHOLD);
+        if (isDuplicate) {
+          dbg(`skip near-duplicate (similarity>${DEDUP_SIMILARITY_THRESHOLD}): "${item.content.slice(0,60)}"`);
+          log.info(`Skipped near-duplicate item: "${item.content.slice(0, 80)}"`);
+          continue;
+        }
+      } catch (err) {
+        dbg(`findSimilarTrace FAILED (continuing without dedup): ${err}`);
+      }
     }
 
     dbg(`insertSensoryTrace: "${item.content.slice(0,60)}" embLen=${embedding?.length ?? 0}`);

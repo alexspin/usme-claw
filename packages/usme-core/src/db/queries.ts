@@ -188,7 +188,7 @@ export async function insertEntityRelationship(
 export async function insertShadowComparison(
   pool: pg.Pool,
   cmp: Omit<ShadowComparison, "id" | "created_at">,
-): Promise<string> {
+): Promise<string | null> {
   const { rows } = await pool.query(
     `INSERT INTO shadow_comparisons
        (session_id, turn_index, query_preview,
@@ -199,6 +199,7 @@ export async function insertShadowComparison(
         token_delta, overlap_score, usme_only_preview, lcm_only_preview,
         usme_relevance_score, usme_memory_cited, relevance_analysis_done)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+     ON CONFLICT (session_id, turn_index) DO NOTHING
      RETURNING id`,
     [
       cmp.session_id, cmp.turn_index, cmp.query_preview,
@@ -210,7 +211,25 @@ export async function insertShadowComparison(
       cmp.usme_relevance_score, cmp.usme_memory_cited, cmp.relevance_analysis_done,
     ],
   );
-  return rows[0].id;
+  // Returns null when ON CONFLICT DO NOTHING skips the insert (duplicate turn)
+  return rows[0]?.id ?? null;
+}
+
+// ── Near-Duplicate Detection ────────────────────────────────
+
+export async function findSimilarTrace(
+  pool: pg.Pool,
+  embedding: number[],
+  threshold: number
+): Promise<boolean> {
+  const result = await pool.query(
+    `SELECT 1 FROM sensory_trace
+     WHERE embedding IS NOT NULL
+       AND 1 - (embedding <=> $1::vector) > $2
+     LIMIT 1`,
+    [JSON.stringify(embedding), threshold]
+  );
+  return result.rows.length > 0;
 }
 
 // ── ANN Search ──────────────────────────────────────────────

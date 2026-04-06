@@ -96,7 +96,7 @@ export async function stepEpisodify(
         .join("\n");
 
       const response = await client.messages.create({
-        model: config.sonnetModel ?? "claude-sonnet-4-20250514",
+        model: config.sonnetModel ?? "claude-sonnet-4-5",
         max_tokens: 1024,
         messages: [
           {
@@ -160,7 +160,7 @@ export async function stepPromote(
     .join("\n\n");
 
   const response = await client.messages.create({
-    model: config.sonnetModel ?? "claude-sonnet-4-20250514",
+    model: config.sonnetModel ?? "claude-sonnet-4-5",
     max_tokens: 2048,
     messages: [
       {
@@ -256,7 +256,7 @@ export async function stepContradictions(
 
   for (const pair of candidates) {
     const response = await client.messages.create({
-      model: config.sonnetModel ?? "claude-sonnet-4-20250514",
+      model: config.sonnetModel ?? "claude-sonnet-4-5",
       max_tokens: 1024,
       messages: [
         {
@@ -345,7 +345,7 @@ export async function stepSkillDraft(
     .join("\n\n");
 
   const response = await client.messages.create({
-    model: config.opusModel ?? config.sonnetModel ?? "claude-sonnet-4-20250514",
+    model: config.opusModel ?? config.sonnetModel ?? "claude-sonnet-4-5",
     max_tokens: 2048,
     messages: [
       {
