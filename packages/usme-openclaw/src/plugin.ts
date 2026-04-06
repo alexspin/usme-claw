@@ -141,13 +141,17 @@ export interface ContextEngine {
 
 // ── Helpers ──────────────────────────────────────────────────
 
-/** Unwrap Anthropic content block arrays to plain text. */
+/** Unwrap Anthropic content block arrays to plain text (recursive). */
 function extractText(content: unknown): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
     return content
-      .filter((b): b is { type: string; text: string } => b && typeof b === "object" && b.type === "text")
-      .map((b) => b.text)
+      .flatMap((b): string[] => {
+        if (!b || typeof b !== "object") return [];
+        if (b.type === "text" && typeof b.text === "string") return [b.text];
+        if (b.content) return [extractText(b.content)];
+        return [];
+      })
       .join("\n");
   }
   return String(content ?? "");
@@ -431,8 +435,11 @@ export function createUsmeEngine(
       setImmediate(() => {
         const anthropicClient = new Anthropic({ apiKey: anthropicKey });
         const serialized = messages
+          .filter((m) => m.role === "user" || m.role === "assistant")
           .slice(-4) // last ~2 turns for context
-          .map((m) => `[${m.role}]: ${stripMetadataEnvelope(extractText(m.content))}`)
+          .map((m) => ({ role: m.role, text: stripMetadataEnvelope(extractText(m.content)) }))
+          .filter(({ text }) => text.length >= 10)
+          .map(({ role, text }) => `[${role}]: ${text}`)
           .join("\n\n");
         runFactExtraction(anthropicClient, getDbPool(), {
           sessionId,
