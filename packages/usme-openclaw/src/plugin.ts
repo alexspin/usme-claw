@@ -142,7 +142,7 @@ function turnIndexFromMessages(messages: AgentMessage[]): number {
 }
 
 /** Convert InjectedMemory[] items into a system prompt addition. */
-function injectedToSystemAddition(items: InjectedMemory[]): string {
+export function injectedToSystemAddition(items: InjectedMemory[]): string {
   if (items.length === 0) return "";
   const lines: string[] = [];
   for (const item of items) {

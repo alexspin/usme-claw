@@ -17,6 +17,7 @@ import {
 } from "@usme/core";
 import type { ShadowComparison, AssembleResult } from "@usme/core";
 import type { UsmePluginConfig } from "./config.js";
+import { injectedToSystemAddition } from "./plugin.js";
 
 export interface AgentMessage {
   role: string;
@@ -156,7 +157,9 @@ export async function recordShadowComparison(
     usme_system_addition_tokens: null,
     token_delta: usmeResult ? (usmeResult.metadata.tokensUsed - lcmTokenCount) : null,
     overlap_score: overlapScore,
-    usme_only_preview: usmeContent.length > 0 ? usmeContent.join('\n\n') : null,
+    usme_only_preview: usmeResult?.items.length
+      ? injectedToSystemAddition(usmeResult.items)
+      : null,
     lcm_only_preview: null,
     usme_relevance_score: null,
     usme_memory_cited: null,
