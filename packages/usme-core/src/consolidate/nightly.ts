@@ -20,6 +20,7 @@ import {
   deactivateConcept,
   insertSkill,
 } from "../db/queries.js";
+import { embedText } from "../embed/index.js";
 import type { SensoryTrace } from "../schema/types.js";
 
 // ── Types ──────────────────────────────────────────────────
@@ -32,6 +33,7 @@ export interface NightlyConfig {
   decayFactor?: number;
   minUtilityScore?: number;
   contradictionCosineThreshold?: number;
+  embeddingApiKey?: string;
 }
 
 export interface NightlyResult {
@@ -48,9 +50,9 @@ export interface NightlyResult {
 
 const log = {
   info: (msg: string, data?: unknown) =>
-    console.log(`[usme:nightly] ${msg}`, data ?? ""),
+    console.log(`[usme:consolidation] ${msg}`, data ?? ""),
   error: (msg: string, err?: unknown) =>
-    console.error(`[usme:nightly] ERROR ${msg}`, err ?? ""),
+    console.error(`[usme:consolidation] ERROR ${msg}`, err ?? ""),
 };
 
 // ── Step 1: Episodify ──────────────────────────────────────
@@ -111,16 +113,29 @@ export async function stepEpisodify(
 
       const timeBucket = chunk[0].created_at;
 
-      await insertEpisode(pool, {
+      const episodeId = await insertEpisode(pool, {
         session_ids: [sessionId],
         time_bucket: timeBucket,
         summary,
-        embedding: null, // generated separately
+        embedding: null,
         source_trace_ids: chunk.map((t) => t.id),
         token_count: Math.ceil(summary.length / 4),
         utility_score: 0.5,
         metadata: { clustered_at: new Date().toISOString() },
       });
+
+      if (config.embeddingApiKey) {
+        try {
+          const vec = await embedText(summary, config.embeddingApiKey);
+          await pool.query(
+            "UPDATE episodes SET embedding = $1::vector WHERE id = $2",
+            [JSON.stringify(vec), episodeId],
+          );
+          log.info(`embedded episode ${episodeId}`);
+        } catch (err) {
+          log.error(`embed episode ${episodeId} failed`, err);
+        }
+      }
 
       await markTracesEpisodified(pool, chunk.map((t) => t.id));
       episodesCreated++;
@@ -191,7 +206,7 @@ export async function stepPromote(
 
   let promoted = 0;
   for (const c of concepts) {
-    await insertConcept(pool, {
+    const conceptId = await insertConcept(pool, {
       concept_type: c.concept_type as "fact" | "preference" | "decision" | "relationship_summary",
       content: c.content,
       embedding: null,
@@ -205,6 +220,18 @@ export async function stepPromote(
       tags: c.tags,
       metadata: { promoted_at: new Date().toISOString() },
     });
+    if (config.embeddingApiKey) {
+      try {
+        const vec = await embedText(c.content, config.embeddingApiKey);
+        await pool.query(
+          "UPDATE concepts SET embedding = $1::vector WHERE id = $2",
+          [JSON.stringify(vec), conceptId],
+        );
+        log.info(`embedded concept ${conceptId}`);
+      } catch (err) {
+        log.error(`embed concept ${conceptId} failed`, err);
+      }
+    }
     promoted++;
   }
 
@@ -281,9 +308,10 @@ export async function stepContradictions(
         await deactivateConcept(pool, pair.id_a, pair.id_b);
         resolved++;
       } else if (decision.resolution === "merge") {
+        const mergedContent = decision.merged_content ?? pair.content_a;
         const newId = await insertConcept(pool, {
           concept_type: "fact",
-          content: decision.merged_content ?? pair.content_a,
+          content: mergedContent,
           embedding: null,
           utility_score: 0.5,
           provenance_kind: "model",
@@ -298,6 +326,18 @@ export async function stepContradictions(
             merged_at: new Date().toISOString(),
           },
         });
+        if (config.embeddingApiKey) {
+          try {
+            const vec = await embedText(mergedContent, config.embeddingApiKey);
+            await pool.query(
+              "UPDATE concepts SET embedding = $1::vector WHERE id = $2",
+              [JSON.stringify(vec), newId],
+            );
+            log.info(`embedded concept ${newId}`);
+          } catch (err) {
+            log.error(`embed concept ${newId} failed`, err);
+          }
+        }
         await deactivateConcept(pool, pair.id_a, newId);
         await deactivateConcept(pool, pair.id_b, newId);
         resolved++;
@@ -370,7 +410,7 @@ export async function stepSkillDraft(
 
   let drafted = 0;
   for (const s of skills) {
-    await insertSkill(pool, {
+    const skillId = await insertSkill(pool, {
       name: s.name,
       description: s.description,
       embedding: null,
@@ -380,6 +420,18 @@ export async function stepSkillDraft(
       teachability: s.teachability,
       metadata: { drafted_at: new Date().toISOString() },
     });
+    if (config.embeddingApiKey) {
+      try {
+        const vec = await embedText(s.description, config.embeddingApiKey);
+        await pool.query(
+          "UPDATE skills SET embedding = $1::vector WHERE id = $2",
+          [JSON.stringify(vec), skillId],
+        );
+        log.info(`embedded skill ${skillId}`);
+      } catch (err) {
+        log.error(`embed skill ${skillId} failed`, err);
+      }
+    }
     drafted++;
   }
 

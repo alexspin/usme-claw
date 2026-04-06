@@ -1,6 +1,6 @@
 /**
- * Cron scheduler for the nightly consolidation job.
- * Default schedule: "0 3 * * *" (3am UTC daily).
+ * Cron scheduler for periodic consolidation.
+ * Default schedule: "0 3 * * *" (periodic consolidation (default: 3am UTC, configure as needed)).
  */
 
 import Anthropic from "@anthropic-ai/sdk";
@@ -11,7 +11,7 @@ import type { NightlyConfig, NightlyResult } from "./nightly.js";
 // ── Types ──────────────────────────────────────────────────
 
 export interface SchedulerConfig extends NightlyConfig {
-  /** Cron expression. Default: "0 3 * * *" (3am UTC). */
+  /** Cron expression. Default: "0 3 * * *" (periodic consolidation (default: 3am UTC, configure as needed)). */
   cronExpression?: string;
   /** If true, run immediately on start before scheduling. */
   runOnStart?: boolean;
@@ -34,9 +34,9 @@ export interface SchedulerHandle {
 
 const log = {
   info: (msg: string, data?: unknown) =>
-    console.log(`[usme:scheduler] ${msg}`, data ?? ""),
+    console.log(`[usme:consolidation] ${msg}`, data ?? ""),
   error: (msg: string, err?: unknown) =>
-    console.error(`[usme:scheduler] ERROR ${msg}`, err ?? ""),
+    console.error(`[usme:consolidation] ERROR ${msg}`, err ?? ""),
 };
 
 // ── Simple Cron Implementation ─────────────────────────────

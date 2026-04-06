@@ -256,6 +256,7 @@ export function createUsmeEngine(
               cronExpression: config.consolidation.cron,
               sonnetModel: config.consolidation.sonnetModel,
               opusModel: config.consolidation.skillDraftingModel,
+              embeddingApiKey: config.embeddingApiKey,
             };
             schedulerHandle = startScheduler(anthropicClient, getDbPool(), schedulerConfig);
             const { getNextCronRunISO } = (() => {
