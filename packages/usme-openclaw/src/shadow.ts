@@ -156,7 +156,7 @@ export async function recordShadowComparison(
     usme_items_selected: usmeResult?.metadata.itemsSelected ?? null,
     usme_items_considered: usmeResult?.metadata.itemsConsidered ?? null,
     usme_system_addition_tokens: null,
-    token_delta: usmeResult ? (usmeResult.metadata.tokensUsed - lcmTokenCount) : null,
+    token_delta: usmeResult ? usmeResult.metadata.tokensUsed : null, // injection token overhead (tokens USME adds to context)
     overlap_score: overlapScore,
     usme_only_preview: usmeResult?.items.length
       ? injectedToSystemAddition(usmeResult.items)
