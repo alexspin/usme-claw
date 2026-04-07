@@ -18,7 +18,7 @@ import {
 } from "@usme/core";
 import type { ShadowComparison, AssembleResult } from "@usme/core";
 import type { UsmePluginConfig } from "./config.js";
-import { injectedToSystemAddition } from "./plugin.js";
+import { injectedToSystemAddition, extractText } from "./plugin.js";
 
 export interface AgentMessage {
   role: string;
@@ -73,12 +73,20 @@ export async function runShadowAssemble(
     const lastUserMessage = [...messages].reverse().find((m) => m.role === "user");
     if (!lastUserMessage || !lastUserMessage.content) return null;
 
-    dbg(`embedText for query: "${lastUserMessage.content.slice(0,80)}" apiKey=${config.embeddingApiKey ? "SET" : "MISSING"}`);
-    const queryEmbedding = await embedText(lastUserMessage.content, config.embeddingApiKey);
+    // Strip metadata envelope (e.g. "Sender (untrusted metadata): ..." prepended by OpenClaw)
+    // before embedding so boilerplate doesn't pollute ANN retrieval.
+    // Use extractText() — same as plugin.ts assemble() — to keep derivation consistent.
+    const rawContent = typeof lastUserMessage.content === "string"
+      ? lastUserMessage.content
+      : JSON.stringify(lastUserMessage.content);
+    const cleanQuery = stripMetadataEnvelope(extractText(rawContent));
+
+    dbg(`embedText for query: "${cleanQuery.slice(0,80)}" apiKey=${config.embeddingApiKey ? "SET" : "MISSING"}`);
+    const queryEmbedding = await embedText(cleanQuery, config.embeddingApiKey);
     dbg(`embedText OK: dimensions=${queryEmbedding?.length}`);
 
     const request = {
-      query: lastUserMessage.content,
+      query: cleanQuery,
       sessionId,
       conversationHistory: messages,
       mode: config.assembly.defaultMode,
@@ -90,7 +98,7 @@ export async function runShadowAssemble(
     const assembleResult = await assemble(request, { pool, queryEmbedding });
     dbg(`assemble() OK: selected=${assembleResult.metadata.itemsSelected} considered=${assembleResult.metadata.itemsConsidered} tiers=${assembleResult.metadata.tiersQueried}`);
 
-    await recordShadowComparison(pool, sessionId, messages, assembleResult, lastUserMessage.content);
+    await recordShadowComparison(pool, sessionId, messages, assembleResult, cleanQuery);
 
     // Fire-and-forget extraction: serialize the last user message and extract facts
     dbg(`extraction check: enabled=${config.extraction.enabled} embeddingApiKey=${config.embeddingApiKey ? "SET("+config.embeddingApiKey.slice(0,8)+"...)" : "MISSING"}`);

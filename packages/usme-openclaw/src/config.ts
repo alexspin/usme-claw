@@ -16,15 +16,22 @@ export interface DbConfig {
   idleTimeoutMs: number;
 }
 
+export interface EntityExtractionConfig {
+  enabled: boolean;
+  model: string;
+}
+
 export interface ExtractionConfig {
   enabled: boolean;
   model: string;
+  entityExtraction: EntityExtractionConfig;
 }
 
 export interface ConsolidationConfig {
   cron: string;
   sonnetModel: string;
   skillDraftingModel: string;
+  reconciliationModel: string;
   candidatesPerNight: number;
 }
 
@@ -66,11 +73,16 @@ export const DEFAULT_CONFIG: UsmePluginConfig = {
   extraction: {
     enabled: true,
     model: "claude-haiku-4-5",
+    entityExtraction: {
+      enabled: true,
+      model: "claude-haiku-4-20250414",
+    },
   },
   consolidation: {
     cron: "0 3 * * *",
     sonnetModel: "claude-sonnet",
     skillDraftingModel: "claude-sonnet",
+    reconciliationModel: "claude-sonnet-4-6",
     candidatesPerNight: 5,
   },
   assembly: {
@@ -95,7 +107,14 @@ export function resolveConfig(
   return {
     mode: partial.mode ?? DEFAULT_CONFIG.mode,
     db: { ...DEFAULT_CONFIG.db, ...partial.db },
-    extraction: { ...DEFAULT_CONFIG.extraction, ...partial.extraction },
+    extraction: {
+      ...DEFAULT_CONFIG.extraction,
+      ...partial.extraction,
+      entityExtraction: {
+        ...DEFAULT_CONFIG.extraction.entityExtraction,
+        ...partial.extraction?.entityExtraction,
+      },
+    },
     consolidation: {
       ...DEFAULT_CONFIG.consolidation,
       ...partial.consolidation,

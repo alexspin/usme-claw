@@ -215,6 +215,47 @@ export async function insertShadowComparison(
   return rows[0]?.id ?? null;
 }
 
+// ── Access Count Tracking ────────────────────────────────────
+
+/**
+ * Increment access counts for memory items that were selected and injected.
+ * Grouped by tier for efficiency. Skips sensory_trace and entities (no access tracking).
+ */
+export async function bumpAccessCounts(
+  pool: pg.Pool,
+  items: import("../assemble/types.js").InjectedMemory[],
+): Promise<void> {
+  if (items.length === 0) return;
+
+  // Group ids by tier
+  const episodeIds = items.filter(i => i.tier === "episodes").map(i => i.id);
+  const conceptIds = items.filter(i => i.tier === "concepts").map(i => i.id);
+  const skillIds   = items.filter(i => i.tier === "skills").map(i => i.id);
+
+  const ops: Promise<unknown>[] = [];
+
+  if (episodeIds.length > 0) {
+    ops.push(pool.query(
+      `UPDATE episodes SET access_count = access_count + 1, last_accessed = NOW() WHERE id = ANY($1::uuid[])`,
+      [episodeIds],
+    ));
+  }
+  if (conceptIds.length > 0) {
+    ops.push(pool.query(
+      `UPDATE concepts SET access_count = access_count + 1, last_accessed = NOW() WHERE id = ANY($1::uuid[])`,
+      [conceptIds],
+    ));
+  }
+  if (skillIds.length > 0) {
+    ops.push(pool.query(
+      `UPDATE skills SET use_count = use_count + 1, last_used = NOW() WHERE id = ANY($1::uuid[])`,
+      [skillIds],
+    ));
+  }
+
+  await Promise.all(ops);
+}
+
 // ── Near-Duplicate Detection ────────────────────────────────
 
 export async function findSimilarTrace(
@@ -230,6 +271,107 @@ export async function findSimilarTrace(
     [JSON.stringify(embedding), threshold]
   );
   return result.rows.length > 0;
+}
+
+// ── Reconciliation ──────────────────────────────────────────
+
+export async function getUnreconciledConcepts(pool: pg.Pool): Promise<Concept[]> {
+  const { rows } = await pool.query(
+    `SELECT * FROM concepts
+     WHERE is_active = true AND metadata->>'reconciled_at' IS NULL
+     ORDER BY created_at ASC`,
+  );
+  return rows;
+}
+
+export async function findReconciliationCandidates(
+  pool: pg.Pool,
+  conceptId: string,
+  embedding: number[] | null,
+  tags: string[],
+): Promise<Concept[]> {
+  const seen = new Set<string>();
+  const results: Concept[] = [];
+
+  // ANN search if embedding available
+  if (embedding) {
+    const vec = vecLiteral(embedding);
+    const { rows } = await pool.query(
+      `SELECT * FROM concepts
+       WHERE embedding IS NOT NULL AND id != $1 AND is_active = true
+       ORDER BY embedding <=> $2::vector
+       LIMIT 10`,
+      [conceptId, vec],
+    );
+    for (const row of rows) {
+      seen.add(row.id);
+      results.push(row);
+    }
+  }
+
+  // Tag overlap search
+  if (tags.length > 0) {
+    const { rows } = await pool.query(
+      `SELECT * FROM concepts
+       WHERE tags && $1 AND id != $2 AND is_active = true
+       LIMIT 5`,
+      [tags, conceptId],
+    );
+    for (const row of rows) {
+      if (!seen.has(row.id)) {
+        seen.add(row.id);
+        results.push(row);
+      }
+    }
+  }
+
+  return results.slice(0, 10);
+}
+
+export async function markConceptReconciled(pool: pg.Pool, conceptId: string): Promise<void> {
+  await pool.query(
+    `UPDATE concepts SET metadata = metadata || jsonb_build_object('reconciled_at', now()::text) WHERE id = $1`,
+    [conceptId],
+  );
+}
+
+export async function updateConceptContent(pool: pg.Pool, conceptId: string, newContent: string): Promise<void> {
+  await pool.query(
+    `UPDATE concepts SET content = $2, updated_at = now() WHERE id = $1`,
+    [conceptId, newContent],
+  );
+}
+
+export async function insertAuditEntry(
+  pool: pg.Pool,
+  entry: {
+    run_id: string;
+    operation: string;
+    concept_type?: string;
+    new_concept_id?: string;
+    target_id?: string;
+    merged_id?: string;
+    before_content?: string;
+    after_content?: string;
+    reasoning?: string;
+    confidence?: number;
+    temporal_note?: string;
+    model_used?: string;
+  },
+): Promise<void> {
+  await pool.query(
+    `INSERT INTO memory_audit_log
+       (run_id, operation, concept_type, new_concept_id, target_id, merged_id,
+        before_content, after_content, reasoning, confidence, temporal_note, model_used)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+    [
+      entry.run_id, entry.operation, entry.concept_type ?? null,
+      entry.new_concept_id ?? null, entry.target_id ?? null, entry.merged_id ?? null,
+      entry.before_content ?? null, entry.after_content ?? null,
+      entry.reasoning ?? null, entry.confidence ?? null,
+      entry.temporal_note ?? null, entry.model_used ?? null,
+    ],
+  );
 }
 
 // ── ANN Search ──────────────────────────────────────────────

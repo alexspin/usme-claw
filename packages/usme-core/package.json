@@ -15,13 +15,13 @@
     "migrate:down": "node-pg-migrate down --migrations-dir db/migrations --database-url-var DATABASE_URL"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.39.0",
+    "@anthropic-ai/sdk": "^0.82.0",
+    "node-pg-migrate": "^7.0",
     "openai": "^4.0.0",
-    "pg": "^8.12",
-    "node-pg-migrate": "^7.0"
+    "pg": "^8.12"
   },
   "devDependencies": {
-    "vitest": "^2.0",
-    "@types/pg": "^8.11"
+    "@types/pg": "^8.11",
+    "vitest": "^2.0"
   }
 }

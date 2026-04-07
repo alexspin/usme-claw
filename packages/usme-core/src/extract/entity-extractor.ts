@@ -6,6 +6,7 @@ import {
   insertEntityRelationship,
   searchByEmbedding,
 } from "../db/queries.js";
+import { embedText } from "../embed/index.js";
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -38,6 +39,7 @@ export interface EntityExtractorConfig {
   model?: string;
   maxTokens?: number;
   cosineDedupeThreshold?: number;
+  embeddingApiKey?: string;
 }
 
 // ── Logger ─────────────────────────────────────────────────
@@ -132,7 +134,17 @@ export async function persistEntities(
 
   // Deduplicate and insert entities
   for (const entity of result.entities) {
-    const existingId = await findDuplicate(pool, entity, null, threshold);
+    // Generate embedding if API key is available
+    let embedding: number[] | null = null;
+    if (config?.embeddingApiKey) {
+      try {
+        embedding = await embedText(entity.canonical, config.embeddingApiKey);
+      } catch (err) {
+        log.error(`Failed to embed entity "${entity.canonical}"`, err);
+      }
+    }
+
+    const existingId = await findDuplicate(pool, entity, embedding, threshold);
 
     if (existingId) {
       entityIdByCanonical.set(entity.canonical, existingId);
@@ -145,7 +157,7 @@ export async function persistEntities(
       name: entity.name,
       entity_type: entity.type,
       canonical: entity.canonical,
-      embedding: null, // embedding generated separately
+      embedding,
       confidence: 1.0,
       metadata: {},
     });

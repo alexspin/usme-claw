@@ -20,6 +20,7 @@ import {
   deactivateConcept,
   insertSkill,
 } from "../db/queries.js";
+import { stepReconcile } from "./reconcile.js";
 import { embedText } from "../embed/index.js";
 import type { SensoryTrace } from "../schema/types.js";
 
@@ -28,6 +29,7 @@ import type { SensoryTrace } from "../schema/types.js";
 export interface NightlyConfig {
   sonnetModel?: string;
   opusModel?: string;
+  reconciliationModel?: string;
   tracesPerBatch?: number;
   tracesPerEpisode?: number;
   decayFactor?: number;
@@ -37,8 +39,10 @@ export interface NightlyConfig {
 }
 
 export interface NightlyResult {
+  runId: string;
   episodesCreated: number;
   conceptsPromoted: number;
+  conceptsReconciled: number;
   contradictionsResolved: number;
   skillsDrafted: number;
   tracesDecayed: number;
@@ -513,10 +517,13 @@ export async function runNightlyConsolidation(
   config: NightlyConfig = {},
 ): Promise<NightlyResult> {
   const start = Date.now();
-  log.info("Nightly consolidation starting");
+  const runId = crypto.randomUUID();
+  log.info(`Nightly consolidation starting (runId=${runId})`);
 
   const episodesCreated = await stepEpisodify(client, pool, config);
   const conceptsPromoted = await stepPromote(client, pool, config);
+  const conceptsReconciled = await stepReconcile(client, pool, config, runId);
+  log.info(`Step 2b: Reconciled ${conceptsReconciled} concepts`);
   const contradictionsResolved = await stepContradictions(client, pool, config);
   const skillsDrafted = await stepSkillDraft(client, pool, config);
   const { decayed, pruned } = await stepDecayAndPrune(pool, config);
@@ -524,8 +531,10 @@ export async function runNightlyConsolidation(
   const durationMs = Date.now() - start;
 
   const result: NightlyResult = {
+    runId,
     episodesCreated,
     conceptsPromoted,
+    conceptsReconciled,
     contradictionsResolved,
     skillsDrafted,
     tracesDecayed: decayed,
@@ -535,6 +544,26 @@ export async function runNightlyConsolidation(
 
   log.info("Nightly consolidation complete", result);
   return result;
+}
+
+/**
+ * Midday partial consolidation pass: episodify + promote + reconcile only.
+ * No decay, no skill drafting.
+ */
+export async function runPartialConsolidation(
+  client: Anthropic,
+  pool: pg.Pool,
+  config: NightlyConfig = {},
+): Promise<{ runId: string; episodesCreated: number; conceptsPromoted: number; conceptsReconciled: number }> {
+  const runId = crypto.randomUUID();
+  log.info(`Partial consolidation starting (runId=${runId})`);
+
+  const episodesCreated = await stepEpisodify(client, pool, config);
+  const conceptsPromoted = await stepPromote(client, pool, config);
+  const conceptsReconciled = await stepReconcile(client, pool, config, runId);
+
+  log.info(`Partial consolidation complete`, { runId, episodesCreated, conceptsPromoted, conceptsReconciled });
+  return { runId, episodesCreated, conceptsPromoted, conceptsReconciled };
 }
 
 // ── Helpers ────────────────────────────────────────────────

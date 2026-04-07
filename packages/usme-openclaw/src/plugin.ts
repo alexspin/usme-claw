@@ -14,8 +14,10 @@ import {
   embedText,
   assemble as coreAssemble,
   runFactExtraction,
+  runEntityExtraction,
   startScheduler,
   stripMetadataEnvelope,
+  bumpAccessCounts,
   type AssembleRequest,
   type AssembleOptions,
   type InjectedMemory,
@@ -142,7 +144,7 @@ export interface ContextEngine {
 // ── Helpers ──────────────────────────────────────────────────
 
 /** Unwrap Anthropic content block arrays to plain text (recursive). */
-function extractText(content: unknown): string {
+export function extractText(content: unknown): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
     return content
@@ -191,35 +193,6 @@ export function injectedToSystemAddition(items: InjectedMemory[]): string {
   ].join("\n");
 }
 
-// ── LCM transform registration ────────────────────────────────
-
-// ORDERING: memtx registers transforms at startup; USME registers here (per-session bootstrap)
-// so USME always runs after memtx in the transform chain. Do not move this registration to module init.
-
-const LCM_TRANSFORM_KEY = '__rufus_lcm_context_transforms';
-const USME_TRANSFORM_REGISTERED_KEY = '__usme_transform_registered';
-
-type LcmTransformFn = (sessionId: string, msgs: unknown[]) => Promise<unknown[] | null>;
-
-function registerLcmTransform(id: string, fn: LcmTransformFn): void {
-  const g = globalThis as Record<string, unknown>;
-  if (!Array.isArray(g[LCM_TRANSFORM_KEY])) {
-    g[LCM_TRANSFORM_KEY] = [];
-  }
-  const transforms = g[LCM_TRANSFORM_KEY] as Array<{ id: string; fn: LcmTransformFn }>;
-  const idx = transforms.findIndex((t) => t.id === id);
-  if (idx >= 0) transforms.splice(idx, 1);
-  transforms.push({ id, fn });
-  g[LCM_TRANSFORM_KEY] = transforms.map((t) => t.fn);
-}
-
-function registerUsmeTransformOnce(fn: LcmTransformFn): void {
-  const g = globalThis as Record<string, unknown>;
-  if (g[USME_TRANSFORM_REGISTERED_KEY]) return;
-  g[USME_TRANSFORM_REGISTERED_KEY] = true;
-  registerLcmTransform('usme-inject', fn);
-}
-
 /** Zero vector fallback for empty queries or missing API key. */
 function zeroEmbedding(): number[] {
   return new Array(1536).fill(0);
@@ -235,6 +208,9 @@ export function createUsmeEngine(
   const config = resolveConfig(userConfig);
   let pool: Pool | null = null;
   let schedulerHandle: SchedulerHandle | null = null;
+
+  // Per-session pre-warm cache: ingest() fires embedText early, assemble() awaits the result
+  const warmCache = new Map<string, Promise<number[]>>();
 
   function getDbPool(): Pool {
     if (!pool) {
@@ -288,77 +264,6 @@ export function createUsmeEngine(
           }
         }
 
-        // Register LCM context transform (per-session bootstrap, after pool is ready)
-        const usmeInjectTransform: LcmTransformFn = async (
-          _sessionId: string,
-          msgs: unknown[],
-        ): Promise<unknown[] | null> => {
-          const timeoutPromise = new Promise<null>((resolve) =>
-            setTimeout(() => resolve(null), 150),
-          );
-          const workPromise = (async (): Promise<unknown[] | null> => {
-            try {
-              // Find the last user message
-              const lastUserMsg = [...(msgs as Array<{ role: string; content?: unknown }>)]
-                .reverse()
-                .find((m) => m.role === "user");
-              if (!lastUserMsg) return null;
-
-              const query = typeof lastUserMsg.content === "string"
-                ? lastUserMsg.content
-                : JSON.stringify(lastUserMsg.content ?? "");
-              if (!query) return null;
-
-              const queryEmbedding = config.embeddingApiKey
-                ? await embedText(query, config.embeddingApiKey)
-                : zeroEmbedding();
-
-              const mode = config.assembly.defaultMode;
-              const budget = (config.assembly.modes as Record<string, { tokenBudget: number }>)[mode].tokenBudget;
-
-              const assembleRequest: AssembleRequest = {
-                query,
-                sessionId: _sessionId,
-                conversationHistory: msgs,
-                mode,
-                tokenBudget: budget,
-                turnIndex: (msgs as Array<{ role: string }>).filter((m) => m.role === "user").length,
-              };
-
-              const assembleOptions: AssembleOptions = {
-                pool: getDbPool(),
-                queryEmbedding,
-              };
-
-              const result = await coreAssemble(assembleRequest, assembleOptions);
-              if (!result.items || result.items.length === 0) return null;
-
-              const contextBlock = injectedToSystemAddition(result.items);
-
-              // Fire-and-forget shadow comparison
-              void recordShadowComparison(
-                getDbPool(),
-                _sessionId,
-                msgs as AgentMessage[],
-                result,
-                query,
-              ).catch(() => {/* ignore */});
-
-              // Append as new user message at end
-              return [
-                ...msgs,
-                { role: "user", content: contextBlock },
-              ];
-            } catch {
-              return null;
-            }
-          })();
-
-          return Promise.race([workPromise, timeoutPromise]);
-        };
-
-        registerUsmeTransformOnce(usmeInjectTransform);
-
         return { ok: true };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -405,6 +310,17 @@ export function createUsmeEngine(
           }
         });
 
+        // Pre-warm: start embedding the user query so assemble() finds it ready
+        if (message.role === "user" && config.embeddingApiKey) {
+          const rawContent = typeof message.content === "string"
+            ? message.content
+            : JSON.stringify(message.content);
+          const strippedQuery = stripMetadataEnvelope(extractText(rawContent));
+          if (strippedQuery.length >= 10) {
+            warmCache.set(sessionId, embedText(strippedQuery, config.embeddingApiKey));
+          }
+        }
+
         return { ok: true, itemId };
       } catch (err) {
         console.error("[usme] ingest failed:", err);
@@ -450,6 +366,15 @@ export function createUsmeEngine(
         }, { model: config.extraction.model, embeddingApiKey: config.embeddingApiKey }).catch((err) => {
           console.error("[usme] afterTurn extraction failed:", err);
         });
+
+        if (config.extraction.entityExtraction.enabled) {
+          runEntityExtraction(anthropicClient, getDbPool(), serialized, {
+            model: config.extraction.entityExtraction.model,
+            embeddingApiKey: config.embeddingApiKey,
+          }).catch((err) => {
+            console.error("[usme] afterTurn entity extraction failed:", err);
+          });
+        }
       });
     },
 
@@ -462,13 +387,14 @@ export function createUsmeEngine(
       const mode = config.assembly.defaultMode;
       const turnIndex = turnIndexFromMessages(messages);
 
-      // Extract query from last user message
+      // Extract query from last user message — strip metadata envelope for ANN consistency
       const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
-      const query = lastUserMsg
+      const rawQuery = lastUserMsg
         ? typeof lastUserMsg.content === "string"
           ? lastUserMsg.content
           : JSON.stringify(lastUserMsg.content)
         : "";
+      const query = stripMetadataEnvelope(extractText(rawQuery));
 
       const assembleRequest: AssembleRequest = {
         query,
@@ -479,11 +405,22 @@ export function createUsmeEngine(
         turnIndex,
       };
 
+      // Use pre-warmed embedding if available (started in ingest()), else fall back to fresh call
+      const warmedEmbeddingPromise = warmCache.get(sessionId);
+      warmCache.delete(sessionId); // consume — one-shot per turn
+
+      let queryEmbedding: number[];
+      if (warmedEmbeddingPromise) {
+        queryEmbedding = await warmedEmbeddingPromise;
+      } else {
+        queryEmbedding = query && config.embeddingApiKey
+          ? await embedText(query, config.embeddingApiKey)
+          : zeroEmbedding();
+      }
+
       const assembleOptions: AssembleOptions = {
         pool: getDbPool(),
-        queryEmbedding: query && config.embeddingApiKey
-          ? await embedText(query, config.embeddingApiKey)
-          : zeroEmbedding(),
+        queryEmbedding,
       };
 
       // Shadow mode: run concurrently but discard output
@@ -499,10 +436,34 @@ export function createUsmeEngine(
         const result = await coreAssemble(assembleRequest, assembleOptions);
         const systemAddition = injectedToSystemAddition(result.items);
 
-        return {
+        // Fire-and-forget: record assembly metrics for active mode
+        void recordShadowComparison(
+          getDbPool(),
+          sessionId,
           messages,
+          result,
+          query || undefined,
+        ).catch(() => {/* ignore */});
+
+        // Fire-and-forget: bump access counts for retrieved items
+        void bumpAccessCounts(getDbPool(), result.items).catch(() => {/* ignore */});
+
+        // Inject USME context as a prepended synthetic user message instead of system prompt addition.
+        // This keeps the system prompt prefix stable for Anthropic prompt cache hits.
+        const finalMessages = systemAddition
+          ? [
+              {
+                role: "user" as const,
+                content: systemAddition,
+              } as AgentMessage,
+              ...messages,
+            ]
+          : messages;
+
+        return {
+          messages: finalMessages,
           estimatedTokens: result.metadata.tokensUsed,
-          systemPromptAddition: systemAddition || undefined,
+          // systemPromptAddition intentionally omitted to preserve prompt cache stability
         };
       } catch (err) {
         console.error("[usme] assemble() failed, returning original messages:", err);

@@ -5,13 +5,16 @@
   "main": "dist/plugin.js",
   "types": "dist/plugin.d.ts",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc --noEmit && esbuild src/plugin.ts --bundle --platform=node --format=esm --outfile=../../../../.openclaw/extensions/usme-claw/dist/plugin.js",
     "test": "vitest run"
   },
   "openclaw": {
     "extensions": [
-      "./src/index.ts"
+      "./dist/plugin.js"
     ]
+  },
+  "devDependencies": {
+    "esbuild": "^0.21.5"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.82.0",
