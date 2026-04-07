@@ -61,7 +61,7 @@ User sends a message
   → score candidates: similarity × recency × provenance × access frequency
   → critic filter: drop low-confidence, inactive, or redundant items
   → greedy pack into token budget
-  → prepend <usme-context> block to system prompt
+  → prepend <usme-context> block as synthetic user message (preserves Anthropic prefix cache)
 ```
 
 **Per-turn (extraction, fire-and-forget, async):**
@@ -326,18 +326,17 @@ LCM (Lossless Context Management, aka `lossless-claw`) and USME solve different 
 
 **Current architecture: USME augments LCM**
 
-Right now, USME runs as a **transform plugin** — it appends a `<usme-context>` block to messages *after* LCM has assembled its context window. LCM owns the conversation history; USME adds semantic memory on top:
+Right now, USME runs as an **OpenClaw ContextEngine** — it prepends a `<usme-context>` synthetic user message to the conversation before the model sees it. LCM owns conversation history; USME adds semantic memory on top. The injection is a synthetic user message (not a system prompt addition) to preserve Anthropic's prefix cache stability:
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│ System prompt                                       │
-│   ┌─────────────────────────────────────────────┐  │
-│   │ <usme-context>                              │  │  ← USME injects here
-│   │ [high] Alex prefers TypeScript strict mode  │  │
-│   │ [high] Decision: OpenAI embeddings only     │  │
-│   │ [med]  USME has 216 sensory traces          │  │
-│   │ </usme-context>                             │  │
-│   └─────────────────────────────────────────────┘  │
+│ System prompt (stable — Anthropic cache hits here)  │
+├─────────────────────────────────────────────────────┤
+│ [synthetic user] <usme-context>                     │  ← USME injects here
+│   [high] Alex prefers TypeScript strict mode        │
+│   [high] Decision: OpenAI embeddings only           │
+│   [med]  USME has 503 sensory traces                │
+│ </usme-context>                                     │
 ├─────────────────────────────────────────────────────┤
 │ Conversation history (LCM: fresh tail + summaries)  │
 └─────────────────────────────────────────────────────┘
@@ -550,7 +549,7 @@ Add to your `plugins` section:
 | Mode | Behaviour |
 |------|-----------|
 | `shadow` | Full pipeline runs; output is logged but not injected. LCM continues as context engine. Use this to evaluate quality before going live. |
-| `active` | USME appends `<usme-context>` block to every turn's system prompt addition. LCM continues to own conversation history. |
+| `active` | USME prepends a synthetic `<usme-context>` user message before the conversation. System prompt stays stable for Anthropic prefix cache hits. LCM continues to own conversation history. |
 | `disabled` | No hooks registered. Plugin is a no-op. |
 
 ### What the injection looks like (active mode)
@@ -725,23 +724,37 @@ SELECT name, description, teachability FROM skills WHERE status = 'candidate';
 
 ## TODO and Future Work
 
+### Critical Bugs (fix before trusting production)
+
+- [ ] **`turnCounter` is module-level** — shared across all sessions; breaks `turn_index` ordering per session. Fix: derive from `messages.filter(m => m.role === 'user').length` per call.
+- [ ] **`compact()` declares `ownsCompaction: true` but always returns `{ compacted: false }`** — set `ownsCompaction: false` or implement episode flush.
+- [ ] **`updateConceptContent` doesn't re-embed** — reconciliation updates concept text but leaves stale embedding vector. Fix: re-embed after content change.
+- [ ] **Pre-warm cache memory leak** — `warmCache` Map grows unbounded when `assemble()` never fires for a session. Fix: TTL eviction or max-size cap.
+
+### Active Mode Correctness
+
+- [ ] **Verbatim traces pollute ANN retrieval** — add `AND item_type = 'extracted'` filter to sensory_trace query in `retrieve.ts`
+- [ ] **Use `ExtractionQueue` for backpressure** — `afterTurn()` uses bare `setImmediate`; route through `getExtractionQueue()` to serialize and avoid rate-limit cascades
+- [ ] **`embedBatch()` in `persistExtractedItems`** — currently embeds facts serially (N OpenAI calls); one batched call saves ~1.5s/turn
+- [ ] **Skill promotion workflow** — skills accumulate as `status='candidate'` but nothing ever promotes them to `active`; add auto-promotion at `teachability >= 0.7`
+- [ ] **Unified Haiku model ID** — `extraction.model: "claude-haiku-4-5"` and `entityExtraction.model: "claude-haiku-4-20250414"` should be consistent
+- [ ] **Add `insight` to `ExtractedItem.type` TypeScript union** — prompt returns it, DB has 13 rows, type system doesn't cover it
+
 ### Immediate (before going live)
 
 - [ ] **Relevance analysis job** — score shadow comparisons against ground truth; `relevance_analysis_done = false` for all rows currently
-- [ ] **Model output extraction wiring** — currently only user messages and system events are extracted; assistant responses contain high-value analysis that should also feed the corpus
+- [ ] **Remove debug logging from production** — `/tmp/usme-debug/*.log` writes in `queries.ts`, `extractor.ts`, `shadow.ts`; gate on `USME_DEBUG=1`
 - [ ] **Active mode end-to-end test** — verify `<usme-context>` block is visible to the model in a real session
-- [ ] **Skill promotion workflow** — UI or CLI to review `candidate` skills and promote to `active`
-- [ ] **Entity extraction integration** — entity extractor is built but not wired into the main extraction queue
 - [ ] **Recency floor for contextEngine mode** — always include last N messages regardless of score, to preserve conversation continuity
 
 ### Short-term (v1 stabilization)
 
 - [ ] **Corpus quality dashboard** — extend rufus-plugin dashboard with USME-specific views: tier sizes, top concepts, recent skills, shadow comparison trends
 - [ ] **Dedup at query time** — currently dedup happens at insert (cosine > 0.95); also add at retrieval to avoid redundant items in packed context
-- [ ] **Access count increment on retrieval** — currently read-only hot path never updates `access_count`; add async access tracking
 - [ ] **`.env.example`** — document required environment variables in a template file
-- [ ] **Consolidate docker-compose.yml and start-db.sh** — currently two parallel ways to start the DB; pick one canonical path
+- [ ] **Cap `stepReconcile` per run** — N+1 DB query pattern; add configurable max-concepts-per-run ceiling
 - [ ] **Integration test suite** — test extraction → consolidation → retrieval round-trip against the test DB
+- [ ] **`stepPromote` empty-result fix** — mark episodes `promoted_at` only when at least one concept was extracted, not unconditionally
 
 ### Medium-term (v2)
 

@@ -1,192 +1,264 @@
-# USME-CLAW Code Review
+# USME Code Review
+**Date:** 2026-04-07  
+**Scope:** Full codebase review — bugs, anti-patterns, design issues, latency analysis  
+**State at review:** Active mode. 503 sensory traces (all embedded), 38 episodes (all embedded), 10 concepts (all embedded, 0 reconciled), 0 entities, 0 skills, 0 shadow_comparisons.
 
-**Reviewer:** reviewer agent
-**Date:** 2026-04-06
-**Branch:** master
+> **Note:** `ARCHITECTURE-REVIEW.md` was written ~2026-04-06 before several major fixes. Items marked ~~strikethrough~~ in that doc are now resolved. This document supersedes it.
 
 ---
 
-## Summary of Changes Reviewed
+## What Changed Since Architecture Review
 
-| File | Status |
+These items from ARCHITECTURE-REVIEW.md are **now fixed**:
+
+| Item | Status |
 |------|--------|
-| `packages/usme-core/src/extract/extractor.ts` | Reviewed — PASS |
-| `packages/usme-core/src/extract/prompts/fact-extraction-v1.ts` | Reviewed — PASS (blocking bug fixed) |
-| `packages/usme-core/src/db/queries.ts` | Reviewed — PASS |
-| `packages/usme-openclaw/src/shadow.ts` | Reviewed — PASS |
-| `packages/usme-openclaw/src/plugin.ts` | Reviewed — PASS |
-| `packages/usme-core/src/consolidate/nightly.ts` | Reviewed — PASS with concerns |
-| `packages/usme-core/tests/unit/selection-formula.test.ts` | Reviewed — PASS |
-| `packages/usme-core/tests/unit/critic-gate.test.ts` | Reviewed — PASS |
-| `packages/usme-openclaw/tests/shadow-comparison.test.ts` | Reviewed — FIXED (API mismatch) |
-| `packages/usme-openclaw/tests/graceful-degradation.test.ts` | Reviewed — FIXED (API mismatch) |
-
-**docs/ARCHITECTURE-REVIEW.md** — Not present (file did not exist at review time).
-**scripts/dedup-corpus.ts** — Not present (file did not exist at review time).
+| Fix 1: embed episodes/concepts/skills at creation | ✅ Done — nightly.ts embeds after insert |
+| Fix 2: afterTurn() calls extractor | ✅ Done — runFactExtraction + runEntityExtraction wired |
+| Fix 3: start scheduler from bootstrap() | ✅ Done — startScheduler() called in bootstrap() |
+| Fix 6: entity extraction never called | ✅ Done — wired into afterTurn() |
+| Fix 4: LCM transform registration bug | ✅ Moot — plugin is now pure ContextEngine, no LCM transform path |
+| bumpAccessCounts | ✅ Added — fire-and-forget after assemble() |
+| Pre-warm embedding cache | ✅ Done — warmCache Map, keyed by sessionId |
+| USME context moved to synthetic user message | ✅ Done — preserves Anthropic prefix cache |
+| stripMetadataEnvelope unified | ✅ Done — both shadow.ts and plugin.ts use extractText |
 
 ---
 
-## Blocking Issues Found and Fixed
+## Active Bugs
 
-### BUG-1: Build failure in `fact-extraction-v1.ts` — FIXED
+### 🔴 Critical
 
-**File:** `packages/usme-core/src/extract/prompts/fact-extraction-v1.ts`, line 13
-**Severity:** Blocking (breaks entire build)
+**1. `turnCounter` is module-level and shared across sessions**  
+Location: `plugin.ts:187` — `let turnCounter = 0`  
+Problem: `turn_index` in `sensory_trace` is supposed to be per-session but uses a global monotonic counter. With 5 concurrent sessions, session B's traces get turn_index 100 when it's actually turn 3. Breaks time-ordering assumptions in episodification clustering.  
+Fix: Derive turn_index from `messages.filter(m => m.role === 'user').length` (already computed as `turnIndexFromMessages` in assemble — use that pattern) or maintain a per-sessionId counter in a Map.
 
-Unescaped backticks inside a template literal:
+**2. `compact()` stub with `ownsCompaction: true`**  
+Location: `plugin.ts:410-430`  
+Problem: Plugin declares it owns compaction but always returns `{ compacted: false }`. If OpenClaw defers its own compaction strategy when `ownsCompaction: true`, sessions that fill their context window get no relief. Long coding sessions will hit context limits silently.  
+Fix (immediate): Set `ownsCompaction: false` until properly implemented.  
+Fix (full): Call `stepEpisodify()` on the current session's traces and return a summary string.
+
+**3. `updateConceptContent` doesn't re-embed**  
+Location: `queries.ts:updateConceptContent`, called from `reconcile.ts`  
+Problem: When reconciliation updates a concept's content, the embedding column stays as the old content's vector. All future ANN searches will use stale vectors. The concept's text says one thing; its position in embedding space says another.  
+Fix: After `UPDATE concepts SET content = $2`, call `embedText(newContent)` and update the embedding in the same transaction or immediately after.
+
+**4. Pre-warm cache memory leak**  
+Location: `plugin.ts:warmCache`  
+Problem: `warmCache` is a module-level Map that lives for the process lifetime. If `ingest()` fires for a session but `assemble()` never runs (aborted turns, heartbeat-only sessions, subagent spawns), the pre-warmed embedding Promise stays in the map forever.  
+Fix: Add a max TTL or max size. Simplest: on each `ingest()`, evict entries older than 60 seconds, or cap the map at 100 entries.
+
+---
+
+### 🟡 Medium
+
+**5. `insight` type in prompt but not in TypeScript union**  
+Location: `extractor.ts:ExtractedItem.type`, `fact-extraction-v1.ts` prompt  
+Problem: The extraction prompt template lists `insight` as a valid type (line: `"type": "fact|preference|decision|plan|insight|anomaly|ephemeral"`). The DB has 13 rows with `memory_type='insight'`. But `ExtractedItem.type` is typed as `"fact" | "preference" | "decision" | "plan" | "anomaly" | "ephemeral"` — `insight` is missing. TypeScript silently allows this because the JSON response is cast with `as FactExtractionResult`. The `insight` values pass through fine at runtime, but the type system gives no coverage.  
+Fix: Add `"insight"` to the `ExtractedItem.type` union. Also add it to `SensoryTrace.memory_type`.
+
+**6. Dead inline extraction function in `shadow.ts`**  
+Location: `shadow.ts:113-137` — the large `extractBlocks` function nested inside the `setImmediate` callback  
+Problem: `extractText()` is imported from `plugin.ts` and used correctly for `cleanQuery` derivation. But the message serialization block still has a hand-rolled inline block extractor. Duplication. Any fix to `extractText` won't affect the shadow path.  
+Fix: Use `extractText(m.content)` in the serialized messages map, same as plugin.ts afterTurn().
+
+**7. `stepPromote` marks episodes as `promoted_at` even when LLM returned no concepts**  
+Location: `nightly.ts:stepPromote:207`  
+Problem: After the Sonnet call, episodes are batch-marked `promoted_at` regardless of whether any concepts were extracted. If the model returns `{ "concepts": [] }` (empty result due to noise or error), those episodes are permanently locked out of future promotion attempts.  
+Fix: Only mark `promoted_at` if at least one concept was successfully inserted. Or add a separate `promotion_attempted_at` field to allow retries.
+
+**8. N+1 queries in `stepReconcile`**  
+Location: `reconcile.ts:stepReconcile`  
+Problem: For each unreconciled concept: 1 ANN query + 1 tag-overlap query + 1 Sonnet call = serial round trips. With 10 concepts = 20 DB queries + 10 LLM calls. With 1000 concepts = 2000 DB queries + 1000 LLM calls (hours of nightly runtime).  
+Fix (medium-term): Batch the ANN queries. Run one large query to find all concept neighborhoods at once, then distribute to LLM calls. Or add a `reconciledCount` cap per run.
+
+**9. `ExtractionQueue` is completely unused**  
+Location: `extract/queue.ts` exists; `afterTurn()` and `shadow.ts` use bare `setImmediate`  
+Problem: If multiple turns complete in rapid succession (batch import, fast-typing user, tool call bursts), multiple concurrent Haiku API calls fire simultaneously. No backpressure. Can trigger rate-limit cascades.  
+Fix: Route `runFactExtraction` and `runEntityExtraction` calls through `getExtractionQueue().enqueue(...)`.
+
+**10. Model ID inconsistency**  
+Location: `config.ts:DEFAULT_CONFIG`  
+Problem: `extraction.model: "claude-haiku-4-5"` and `entityExtraction.model: "claude-haiku-4-20250414"` — two different strings for Haiku. One is likely wrong or both are wrong (Anthropic model IDs have a specific date format like `claude-haiku-4-5-20250714`). This may be silently falling back to a default model.  
+Fix: Validate model IDs against the Anthropic API. Unify to a single haiku alias or correct date-stamped ID.
+
+**11. Debug `/tmp/usme-debug` logging left in production**  
+Location: `queries.ts`, `extractor.ts`, `shadow.ts` — all have `dbg()` functions writing to `/tmp/usme-debug/*.log`  
+Problem: Every production run appends to `/tmp` files. On a server running for weeks, these grow unbounded. Not appropriate for production.  
+Fix: Gate on `process.env.USME_DEBUG === '1'`. Or remove entirely — the structured `console.log/error` calls are sufficient.
+
+---
+
+### 🟢 Low / Design
+
+**12. Verbatim traces pollute ANN retrieval**  
+`item_type='verbatim'` rows are stored in `sensory_trace` with embeddings (deferred via setImmediate). The ANN query in `retrieve.ts` doesn't filter by `item_type`, so raw unstructured messages compete with extracted semantic facts. Verbatim traces tend to be long, noisy, context-specific, and redundant with extracted facts from the same message. They'll lower precision.  
+Options: (a) exclude verbatim from ANN retrieval by adding `AND item_type = 'extracted'` to the sensory_trace query, or (b) keep but lower their relevance with a lower `utility_prior`. Option (a) is cleaner.
+
+**13. `annSearchK` in mode profiles is silently ignored**  
+Location: `modes.ts:annSearchK`, `retrieve.ts`  
+`MODE_PROFILES` defines `annSearchK: 40` (brilliant), `60` (psycho-genius), `20` (smart-efficient), but `retrieve.ts` only uses `candidatesPerTier`. `annSearchK` is never read. Either remove the field or pass it to retrieve as the HNSW ef_search parameter (pgvector SET `hnsw.ef_search`).
+
+**14. `ingestBatch` is serial**  
+`ingestBatch` calls `engine.ingest()` in a for loop. Fine for small batches (session history import), wasteful for large ones. Could use `Promise.all` or a bulk SQL INSERT.
+
+**15. Skill promotion path is missing**  
+Skills are created as `status='candidate'` by `stepSkillDraft()`. The ANN query in `retrieve.ts` filters `WHERE status = 'active'`. There is no code that ever promotes a skill from `candidate` → `active`. Skills will accumulate in the DB but never appear in retrieval.  
+Fix: Add a `stepPromoteSkills` function that auto-promotes candidates with `teachability >= config threshold` (e.g., 0.7) and reasonable `use_count`.
+
+---
+
+## Latency Analysis
+
+### Hot Path (per turn, synchronous)
 
 ```
-Ignore any `Sender (untrusted metadata)` sections — ...
+ingest() — called when user message arrives
+  insertSensoryTrace:        ~5ms   (DB write)
+  setImmediate embed-after-insert:  async (hidden)
+  warmCache.set(embedText()):       async Promise started, not awaited
+
+assemble() — called before model sees context
+  warmCache lookup:           ~0ms
+  
+  ── Case A: pre-warm HIT (normal case, same turn as ingest) ──
+  await warmedEmbeddingPromise:   ~0ms (already resolved, OAI was ~420ms but hidden)
+  ANN queries (5 tiers parallel):  ~20-80ms
+  score + critic + pack:           ~1ms (in-process)
+  Total assemble():                ~25-85ms ✅ within 150ms budget
+
+  ── Case B: pre-warm MISS ──
+  embedText() fresh call:          ~420ms (OpenAI text-embedding-3-small)
+  ANN queries:                     ~25ms
+  Total assemble():                ~445ms ❌ 3x over budget
 ```
 
-TypeScript parsed the inner backticks as template literal delimiters, splitting the string and producing 4 compile errors. Fixed by escaping: `` \`Sender (untrusted metadata)\` ``.
+**Pre-warm miss triggers:**
+- First turn of a session (no prior ingest)
+- Heartbeat turns (isHeartbeat=true skips ingest, clears warmCache path)
+- Sub-agent spawns (fresh session, no ingest yet)
+- `ingestBatch` with multiple messages — only the last user message gets pre-warmed; if assemble is called with the same session after ingest already happened, warmCache has the right key; but if assemble fires for a different session or message, miss
 
-**Build status after fix:** PASS (both packages compile cleanly).
+**ANN query breakdown:**
+- Per tier: `embedding <=> $1::vector ORDER BY ... LIMIT 20` with HNSW index
+- Postgres HNSW with `ef_search=40` (default): ~5-15ms per query on warm cache
+- 5 tiers in parallel: dominated by slowest tier ~15-25ms
+- 80ms per-tier timeout via `withTimeout` is generous — actual queries should be 5-25ms
 
-### BUG-2: Test API mismatch in `shadow-comparison.test.ts` and `graceful-degradation.test.ts` — FIXED
+**Realistic P95 (warm path):** ~50-80ms including pre-warm  
+**Realistic P95 (cold/miss path):** ~440-500ms — **exceeds budget**
 
-**File:** `packages/usme-openclaw/tests/shadow-comparison.test.ts` and `graceful-degradation.test.ts`
-**Severity:** Blocking (2 test failures)
+### Async Path (fire-and-forget, afterTurn)
 
-Tests called `runShadowAssemble(async () => mockResult)` (callback pattern), but the actual implementation signature is `runShadowAssemble(pool, config, sessionId, messages)`. The tests were written against a planned interface that was never implemented.
+```
+afterTurn() — fires after model responds
+  setImmediate:                     ~0ms (schedules, returns)
+  
+  Inside setImmediate:
+    serialized turn preparation:   ~1ms
+    runFactExtraction:
+      Haiku API call:               ~300-600ms
+      parse + embed N items:        ~420ms × N (parallel via setImmediate per item... actually serial in persistExtractedItems)
+      dedup check per item:         ~5ms × N (DB query)
+      insertSensoryTrace × N:       ~5ms × N
+      Total for 5 extracted facts:  ~1.5-2.5s
 
-Fixed by rewriting both test files to test the actual exported API:
-- `shadow-comparison.test.ts` now tests `computeOverlapScore` directly (the pure unit-testable function).
-- `graceful-degradation.test.ts` now calls `runShadowAssemble` with proper stub parameters, verifying it catches errors and returns null gracefully.
+    runEntityExtraction (parallel):
+      Haiku API call:               ~300-600ms
+      embed × M entities:           ~420ms × M (serial in persistEntities)
+      dedup check × M:              ~10ms × M
+      insert × M:                   ~5ms × M
+      Total for 3 entities:         ~1.8-2.5s
+```
 
-**Test status after fix:** 53 tests pass, 0 fail (45 in usme-core, 8 in usme-openclaw).
+**Total async overhead per turn: 2-5 seconds** (completely hidden from user — fire-and-forget)
 
----
+**Issue:** `persistExtractedItems` embeds items serially (one `await embedText()` per item). 5 extracted facts = 5 sequential API calls. Use `embedBatch()` for a single batched call.
 
-## Per-REQ Assessment
+### Nightly Consolidation
 
-### REQ-1: Fact Extraction Pipeline (`extractor.ts`)
+```
+stepEpisodify (1 episode per 15 traces):
+  500 traces → 33 episodes
+  33 × Sonnet call:    ~33 × 2s = 66s
+  33 × embedText:      ~33 × 0.42s = 14s
+  Total:               ~80s
 
-**Verdict: PASS**
+stepPromote:
+  1 Sonnet call:       ~3s
+  N × embedText (new concepts): ~N × 0.42s
+  Total:               ~5s (for ~10 new concepts)
 
-- Correctness: JSON parsing is robust (finds outermost `{...}` block, handles fenced responses).
-- Edge cases: Empty message handled (returns `[]`); missing API key handled (skips embedding, stores without vector); discard utility items are skipped correctly.
-- Error handling: `runFactExtraction` swallows errors (intentionally non-blocking). `persistExtractedItems` continues loop on per-item errors.
-- Debug logging via `/tmp/usme-debug/` is verbose but appropriate for a v0.1 pipeline.
-- Model: Uses `"claude-haiku-4-5"` — correct pattern per naming convention.
+stepReconcile:
+  10 concepts × (1 ANN + 1 tag + 1 Sonnet):  ~10 × 3s = 30s
+  Total:               ~30s
 
-**Minor concern:** `extractFacts` does not validate individual item fields (e.g., `type` enum, `utility` enum). A malformed LLM response could persist garbage. Not blocking but worth a follow-up validator.
+stepContradictions:
+  1 DB query
+  K × Sonnet calls:   ~K × 3s
+  Total:               ~0-30s
 
-### REQ-2: Prompt Template (`fact-extraction-v1.ts`)
+stepSkillDraft:
+  1 Sonnet call:       ~3s
+  Total:               ~5s
 
-**Verdict: PASS** (after blocking fix)
+stepDecayAndPrune:
+  3 DB UPDATE/DELETE:  ~10ms
+  Total:               ~0s
 
-- The instruction `Ignore any \`Sender (untrusted metadata)\` sections` is a useful addition that prevents the extractor from storing routing metadata as facts.
-- The prompt is clear and well-structured with examples.
-- The `{date}` and `{serialized_turn}` substitution placeholders are correct.
+Full nightly (500 traces): ~120-150s (2-3 minutes) ✅
+At 5000 traces:            ~1200s (20 minutes) — approaching problematic
+```
 
-### REQ-3: DB Queries (`queries.ts`)
+### Optimization Opportunities (Priority Order)
 
-**Verdict: PASS**
-
-- `vecLiteral()` correctly returns `null` for missing embeddings, allowing nullable embedding column.
-- `insertSensoryTrace` passes `episodified_at` in the type but omits it from the INSERT column list — this is intentional since the column has a DB default of NULL; however the type includes it as an explicit field. Not a bug since the column defaults correctly, but slightly confusing.
-- `searchByEmbedding` uses `$1::vector` cast, which is correct for pgvector. Table name interpolation is safe because it's constrained to a typed union.
-- `latency_ms` values are rounded via `Math.round()` before insert — appropriate since the column is likely integer.
-
-### REQ-4: Shadow Mode (`shadow.ts`)
-
-**Verdict: PASS**
-
-- Graceful degradation: `runShadowAssemble` catches all errors and returns `null`.
-- `computeOverlapScore`: correctly handles all edge cases (both empty = 1.0, one empty = 0.0, partial overlap = Jaccard).
-- Extraction is fire-and-forget via `setImmediate`, correctly gated on `config.extraction.enabled` and `ANTHROPIC_API_KEY`.
-- The 150ms timeout in the LCM transform (in `plugin.ts`) prevents blocking the main thread.
-
-**Minor concern:** `runShadowAssemble` calls `embedText` with `config.embeddingApiKey` directly. If the key is an empty string `""`, this will make a real API call and fail. A guard `if (!config.embeddingApiKey) return null;` would be cleaner (though the function does degrade gracefully on the error).
-
-### REQ-5: Plugin Implementation (`plugin.ts`)
-
-**Verdict: PASS**
-
-- `injectedToSystemAddition()` formats memory items with tier, date, relevance label, and tags — rich context format suitable for LLM consumption.
-- LCM transform registration uses `USME_TRANSFORM_REGISTERED_KEY` to prevent duplicate registration across sessions (correct).
-- `zeroEmbedding()` returns 1536-dimension zero vector as fallback — this is a reasonable sentinel that will result in zero cosine similarity for all stored items (safe, returns no results).
-- `ingest()` uses a module-level `turnCounter` — this is a **known limitation** (not per-session), but acceptable for v0.1 shadow mode where turn indexing precision is not critical.
-- `afterTurn()` logs intent but does not actually trigger extraction — deferred to extraction worker. Comment accurately documents this.
-- `compact()` is stub with honest TODO comment. `ownsCompaction: true` in info is set but compact is a no-op — this could suppress the LCM's own compaction. Worth monitoring.
-
-**Concern:** `compact()` returns `ownsCompaction: true` but does nothing. If the host framework respects this flag and skips its own compaction, sessions may accumulate unbounded context. Consider setting `ownsCompaction: false` until real compaction is implemented.
-
-### REQ-6: Nightly Consolidation (`nightly.ts`)
-
-**Verdict: PASS with concerns**
-
-- All 5 pipeline steps are implemented and individually idempotent.
-- `chunkArray` correctly handles edge cases (k=1, uneven sizes).
-- Step 5 (decay + prune) correctly skips skill decay per design spec (D7).
-
-**Concerns:**
-
-1. **Model name inconsistency:** `nightly.ts` uses `"claude-sonnet-4-20250514"` as the default. The naming convention in this codebase is `"claude-sonnet-4-5"` (as used in extractor.ts and config). The `4-20250514` suffix is a real model alias but inconsistent with the rest of the codebase. This is not a breaking issue since both aliases resolve correctly, but creates confusion.
-
-2. **JSON injection in SQL (Step 2 and 4):** The `UPDATE episodes SET metadata = metadata || '{"promoted_at": "${new Date().toISOString()}"}'::jsonb` pattern interpolates a JS date string directly into a SQL string. This is safe for ISO date strings (no injection risk) but is a code smell — a parameterized JSON approach would be cleaner.
-
-3. **Step 3 (contradiction detection):** The query finds concept pairs by cosine distance, but concepts without embeddings (`embedding IS NOT NULL`) are skipped. Since `insertConcept` sets `embedding: null` in all current callers, Step 3 will never find any candidates until a separate embedding job runs. This is not a bug (the code handles it gracefully) but is a gap in the pipeline.
-
-4. **Step 2 JSON parse:** Uses `JSON.parse(text)` without the outermost-bracket extraction used in `extractor.ts`. If Sonnet wraps the response in prose, this will fail silently (returns 0 concepts). Should use the same robust extraction pattern.
-
-### REQ-7: Test Coverage
-
-**Verdict: PASS**
-
-- `selection-formula.test.ts`: Good coverage of `pack()` and `scoreCandidates()` including edge cases (zero budget, empty array, exact budget, ordering, skill weights).
-- `critic-gate.test.ts`: Good coverage of all filter rules with boundary tests (confidence exactly 0.3 passes, as intended).
-- `shadow-comparison.test.ts` (fixed): Tests `computeOverlapScore` exhaustively.
-- `graceful-degradation.test.ts` (fixed): Verifies the function handles the no-user-message case and the API-key-missing case without throwing.
+1. **Use `embedBatch()` in `persistExtractedItems`** — 5 serial embeds → 1 batched call. Saves ~1.5s per turn.
+2. **Local embedding model (Ollama)** — eliminate 420ms OpenAI round-trip entirely. Olama `nomic-embed-text` runs in ~5ms locally. Most impactful latency change possible.
+3. **Set `hnsw.ef_search`** per mode — brilliant/smart-efficient can use lower ef_search (faster ANN, slightly lower recall).
+4. **Batch stepReconcile DB queries** — single ANN query for all concepts instead of N individual queries.
+5. **Limit stepEpisodify batches** — cap at 200 traces per night to keep nightly under 60s.
 
 ---
 
-## Model Name Consistency
+## Doc vs Code Drift
 
-| Location | Model Used | Status |
-|----------|-----------|--------|
-| `extractor.ts` (haiku) | `claude-haiku-4-5` | Correct |
-| `nightly.ts` (sonnet) | `claude-sonnet-4-20250514` | INCONSISTENT — should be `claude-sonnet-4-5` |
-| `config.ts` (extraction model) | (not reviewed but expected `claude-haiku-4-5`) | — |
+### `docs/design.md`
+- **Directory tree (Section 3)** is stale. Actual structure:
+  - `consolidate/` is a single `nightly.ts` (not `episodify.ts`, `promote.ts`, `contradict.ts`, `skill-draft.ts`, `decay.ts`)
+  - No `adapter.ts` — adapter logic is inline in plugin.ts (`injectedToSystemAddition`)
+  - `schema/config.ts` doesn't exist — config is in `extract/prompts/types.ts` and each package's `config.ts`
+  - Migration 007 is `shadow_comparisons.sql` (not `entity_relationships.sql` — that's 006/007)
+- **Section 12 (ContextEngine Implementation)** is pseudocode that differs from actual implementation.
+- The `assemble()` description says "prepend `<usme-context>` block to system prompt" but actual implementation prepends as synthetic user message.
+- D4 says "Entities surface through concepts" — now entities have their own tier in retrieval.
 
-Recommendation: Standardize `nightly.ts` defaults to `"claude-sonnet-4-5"`.
+### `docs/ARCHITECTURE-REVIEW.md`
+Many items in "What Is Dead Code / Disconnected" and "Part D: Ordered Fix List" are now resolved. The doc is misleading. See the resolution table at the top of this file.
 
----
-
-## Architecture Assessment: Moves USME Toward mem0-level Value?
-
-**Yes, with caveats.**
-
-The implemented pieces represent the core of what makes mem0 valuable:
-- **Extraction pipeline**: Turn-level fact extraction with type classification, utility scoring, and TTL — this is the foundation.
-- **5-tier memory hierarchy** (traces → episodes → concepts → skills → entities): Architecturally correct, pipeline exists, but embeddings for episodes/concepts are not yet populated (all stored with `embedding: null`), so semantic retrieval will not function for those tiers.
-- **Shadow mode with LCM transform injection**: The most immediately operational piece. Memory is being assembled and injected into the context window.
-- **Nightly consolidation**: Pipeline is in place and idempotent. The embedding gap (concepts stored without vectors) will prevent contradiction detection from working until an embedding backfill job is added.
-
-**Key remaining gap:** There is no background job that embeds episodes and concepts after they are created. `insertEpisode`, `insertConcept`, and `insertSkill` all pass `embedding: null`. Until this is resolved, the ANN search path for those tiers returns nothing, and contradiction detection is blind.
+### `README.md`
+- TODO section may reference already-completed items.
+- "Hot path" description says system prompt injection — it's actually synthetic user message injection now.
 
 ---
 
-## Blocking Issues Summary
+## Summary Table
 
-| # | Issue | Fixed? |
-|---|-------|--------|
-| BUG-1 | Build failure due to unescaped backticks in template literal | YES |
-| BUG-2 | Test API mismatch (callback vs real signature) causing 2 test failures | YES |
-
----
-
-## Recommendations (Non-blocking)
-
-1. **`nightly.ts`**: Change `"claude-sonnet-4-20250514"` default to `"claude-sonnet-4-5"` for consistency.
-2. **`nightly.ts` Step 2**: Use the `jsonStart`/`jsonEnd` robust extraction pattern (same as `extractor.ts`) when parsing Sonnet's concept promotion response.
-3. **`plugin.ts`**: Set `ownsCompaction: false` until real compaction is implemented, or document the risk of accumulation.
-4. **Add embedding backfill job**: Episodes and concepts are stored without embeddings. A background job calling `embedText` and updating the row is needed before the consolidation pipeline provides real ANN recall value.
-5. **`extractor.ts`**: Add a per-item schema validator to reject malformed LLM output before persisting.
-
----
-
-## Overall Verdict: PASS (after fixes)
-
-Both blocking issues were fixed in-place. Build compiles cleanly. All 53 tests pass. The codebase implements a coherent architecture with the right abstractions. The remaining gaps (no embedding backfill, stub compaction, inconsistent model names) are non-blocking for v0.1 shadow mode operation.
+| Component | State | Notes |
+|-----------|-------|-------|
+| Verbatim ingest | Working but wasteful | Pollutes ANN retrieval; consider filtering |
+| Fact extraction (afterTurn) | Working | Serial embeds; use embedBatch |
+| Entity extraction | Working (just wired) | No production data yet |
+| ExtractionQueue | Complete, unused | Use it for backpressure |
+| ANN retrieve | Working | All tiers populated. Pre-warm miss = 440ms |
+| Scoring/critic/pack | Correct | annSearchK ignored |
+| Pre-warm cache | Working | Memory leak on miss; needs TTL/eviction |
+| Shadow comparisons | 0 rows (active mode) | recordShadowComparison fires but no turns yet |
+| Nightly consolidation | Scheduled, working | stepPromote marks episodes too aggressively |
+| Concept reconciliation | Built, scheduled | Not run yet; updateConceptContent doesn't re-embed |
+| compact() | Stub | ownsCompaction=true is dangerous |
+| Skill promotion | Missing | Skills accumulate as candidate, never activated |
+| turnCounter | Bug | Module-level, breaks multi-session correctness |
+| Debug logging | In production | /tmp/usme-debug writes everywhere |
+| Model IDs | Inconsistent | haiku-4-5 vs haiku-4-20250414 |
