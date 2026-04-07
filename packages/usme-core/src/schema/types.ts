@@ -3,7 +3,7 @@ export interface SensoryTrace {
   session_id: string;
   turn_index: number;
   item_type: "verbatim" | "extracted";
-  memory_type: "fact" | "preference" | "decision" | "plan" | "anomaly" | "ephemeral" | null;
+  memory_type: "fact" | "preference" | "decision" | "plan" | "anomaly" | "ephemeral" | "insight" | null;
   content: string;
   embedding: number[] | null;
   provenance_kind: "user" | "tool" | "model" | "web" | "file";

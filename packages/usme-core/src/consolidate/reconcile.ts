@@ -5,6 +5,7 @@ import {
   findReconciliationCandidates,
   markConceptReconciled,
   updateConceptContent,
+  updateConceptEmbedding,
   insertAuditEntry,
   insertConcept,
   deactivateConcept,
@@ -75,11 +76,17 @@ export async function stepReconcile(
   config: NightlyConfig,
   runId: string,
 ): Promise<number> {
-  const concepts = await getUnreconciledConcepts(pool);
+  let concepts = await getUnreconciledConcepts(pool);
 
   if (concepts.length === 0) {
     log.info("No unreconciled concepts found");
     return 0;
+  }
+
+  const cap = (config as NightlyConfig & { maxConceptsPerRun?: number }).maxConceptsPerRun ?? 50;
+  if (concepts.length > cap) {
+    log.info(`Capping concepts from ${concepts.length} to ${cap}`);
+    concepts = concepts.slice(0, cap);
   }
 
   log.info(`Reconciling ${concepts.length} concepts`);
@@ -171,6 +178,14 @@ export async function stepReconcile(
       } else if (decision.operation === "update" && decision.target_id && decision.updated_content) {
         const target = candidates.find(c => c.id === decision.target_id);
         await updateConceptContent(pool, decision.target_id, decision.updated_content);
+        if (config.embeddingApiKey) {
+          try {
+            const newEmbedding = await embedText(decision.updated_content, config.embeddingApiKey);
+            await updateConceptEmbedding(pool, decision.target_id, newEmbedding);
+          } catch (err) {
+            log.error(`Failed to re-embed updated concept ${decision.target_id}`, err);
+          }
+        }
         await markConceptReconciled(pool, decision.target_id);
         await insertAuditEntry(pool, {
           run_id: runId,

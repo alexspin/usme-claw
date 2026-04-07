@@ -72,7 +72,7 @@ export const DEFAULT_CONFIG: UsmePluginConfig = {
   },
   extraction: {
     enabled: true,
-    model: "claude-haiku-4-5",
+    model: "claude-haiku-4-20250414",
     entityExtraction: {
       enabled: true,
       model: "claude-haiku-4-20250414",

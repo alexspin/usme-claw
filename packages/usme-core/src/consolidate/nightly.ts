@@ -36,6 +36,7 @@ export interface NightlyConfig {
   minUtilityScore?: number;
   contradictionCosineThreshold?: number;
   embeddingApiKey?: string;
+  maxConceptsPerRun?: number;
 }
 
 export interface NightlyResult {
@@ -242,11 +243,15 @@ export async function stepPromote(
 
   // Mark episodes as promoted
   const episodeIds = episodes.map((e: { id: string }) => e.id);
-  await pool.query(
-    `UPDATE episodes SET metadata = metadata || '{"promoted_at": "${new Date().toISOString()}"}'::jsonb
-     WHERE id = ANY($1)`,
-    [episodeIds],
-  );
+  if (promoted > 0) {
+    await pool.query(
+      `UPDATE episodes SET metadata = metadata || '{"promoted_at": "${new Date().toISOString()}"}'::jsonb
+       WHERE id = ANY($1)`,
+      [episodeIds],
+    );
+  } else {
+    console.log('[stepPromote] skipping markEpisodesPromoted — no concepts extracted from batch');
+  }
 
   log.info(`Step 2: Promoted ${promoted} concepts from ${episodes.length} episodes`);
   return promoted;

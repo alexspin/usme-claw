@@ -15,6 +15,7 @@ import {
   assemble as coreAssemble,
   runFactExtraction,
   runEntityExtraction,
+  getExtractionQueue,
   startScheduler,
   stripMetadataEnvelope,
   bumpAccessCounts,
@@ -200,8 +201,6 @@ function zeroEmbedding(): number[] {
 
 // ── Plugin implementation ────────────────────────────────────
 
-let turnCounter = 0;
-
 export function createUsmeEngine(
   userConfig?: Partial<UsmePluginConfig>,
 ): ContextEngine {
@@ -211,6 +210,7 @@ export function createUsmeEngine(
 
   // Per-session pre-warm cache: ingest() fires embedText early, assemble() awaits the result
   const warmCache = new Map<string, Promise<number[]>>();
+  const warmCacheTimestamps: Map<string, number> = new Map();
 
   function getDbPool(): Pool {
     if (!pool) {
@@ -229,7 +229,7 @@ export function createUsmeEngine(
       id: "usme-claw",
       name: "USME Context Engine",
       version: "0.1.0",
-      ownsCompaction: true,
+      ownsCompaction: false,
     },
 
     async bootstrap({ sessionId }) {
@@ -276,11 +276,27 @@ export function createUsmeEngine(
       if (config.mode === "disabled") return { ok: true };
       if (isHeartbeat) return { ok: true };
 
+      // Sweep stale warmCache entries (TTL: 2 minutes, max: 200 entries)
+      const now = Date.now();
+      for (const [sid, ts] of warmCacheTimestamps) {
+        if (now - ts > 120_000) {
+          warmCache.delete(sid);
+          warmCacheTimestamps.delete(sid);
+        }
+      }
+      if (warmCache.size > 200) {
+        const oldest = [...warmCacheTimestamps.entries()].sort((a, b) => a[1] - b[1])[0];
+        if (oldest) {
+          warmCache.delete(oldest[0]);
+          warmCacheTimestamps.delete(oldest[0]);
+        }
+      }
+
       try {
         const p = getDbPool();
         const itemId = await insertSensoryTrace(p, {
           session_id: sessionId,
-          turn_index: turnCounter++,
+          turn_index: 0,
           item_type: "verbatim",
           memory_type: null,
           content: typeof message.content === "string" ? message.content : JSON.stringify(message.content),
@@ -318,6 +334,7 @@ export function createUsmeEngine(
           const strippedQuery = stripMetadataEnvelope(extractText(rawContent));
           if (strippedQuery.length >= 10) {
             warmCache.set(sessionId, embedText(strippedQuery, config.embeddingApiKey));
+            warmCacheTimestamps.set(sessionId, Date.now());
           }
         }
 
@@ -347,35 +364,22 @@ export function createUsmeEngine(
       const anthropicKey = process.env.ANTHROPIC_API_KEY ?? "";
       if (!anthropicKey) return;
 
-      // Fire-and-forget fact extraction (non-blocking)
-      setImmediate(() => {
-        const anthropicClient = new Anthropic({ apiKey: anthropicKey });
-        const serialized = messages
-          .filter((m) => m.role === "user" || m.role === "assistant")
-          .map((m) => {
-            const text = stripMetadataEnvelope(extractText(m.content));
-            return text.length >= 10 ? `[${m.role}]: ${text}` : null;
-          })
-          .filter((s): s is string => s !== null)
-          .slice(-4)
-          .join("\n\n");
-        runFactExtraction(anthropicClient, getDbPool(), {
-          sessionId,
-          turnIndex: messages.length,
-          serializedTurn: serialized,
-        }, { model: config.extraction.model, embeddingApiKey: config.embeddingApiKey }).catch((err) => {
-          console.error("[usme] afterTurn extraction failed:", err);
-        });
-
-        if (config.extraction.entityExtraction.enabled) {
-          runEntityExtraction(anthropicClient, getDbPool(), serialized, {
-            model: config.extraction.entityExtraction.model,
-            embeddingApiKey: config.embeddingApiKey,
-          }).catch((err) => {
-            console.error("[usme] afterTurn entity extraction failed:", err);
-          });
-        }
-      });
+      // Queue fact and entity extraction (non-blocking, serialized via queue)
+      const anthropicClient = new Anthropic({ apiKey: anthropicKey });
+      const serializedTurn = messages
+        .filter((m) => m.role === "user" || m.role === "assistant")
+        .map((m) => {
+          const text = stripMetadataEnvelope(extractText(m.content));
+          return text.length >= 10 ? `[${m.role}]: ${text}` : null;
+        })
+        .filter((s): s is string => s !== null)
+        .slice(-4)
+        .join("\n\n");
+      const queue = getExtractionQueue();
+      queue.enqueue(async () => { await runFactExtraction(anthropicClient, getDbPool(), { sessionId, turnIndex: messages.filter(m => m.role === 'user').length, serializedTurn }, { model: config.extraction.model, embeddingApiKey: config.embeddingApiKey }); });
+      if (config.extraction.entityExtraction.enabled) {
+        queue.enqueue(async () => { await runEntityExtraction(anthropicClient, getDbPool(), serializedTurn, { model: config.extraction.entityExtraction.model, embeddingApiKey: config.embeddingApiKey }); });
+      }
     },
 
     async assemble({ sessionId, messages, tokenBudget }) {
@@ -514,6 +518,7 @@ export function createUsmeEngine(
         schedulerHandle.stop();
         schedulerHandle = null;
       }
+      await getExtractionQueue().drain();
       await closePool();
       pool = null;
     },

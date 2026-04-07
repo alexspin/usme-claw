@@ -6,7 +6,7 @@ import {
   insertEntityRelationship,
   searchByEmbedding,
 } from "../db/queries.js";
-import { embedText } from "../embed/index.js";
+import { embedBatch } from "../embed/index.js";
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -132,17 +132,24 @@ export async function persistEntities(
   let insertedEntities = 0;
   let skippedDuplicates = 0;
 
-  // Deduplicate and insert entities
-  for (const entity of result.entities) {
-    // Generate embedding if API key is available
-    let embedding: number[] | null = null;
-    if (config?.embeddingApiKey) {
-      try {
-        embedding = await embedText(entity.canonical, config.embeddingApiKey);
-      } catch (err) {
-        log.error(`Failed to embed entity "${entity.canonical}"`, err);
+  // Batch embed all entity canonicals at once
+  const entityEmbeddings: (number[] | null)[] = result.entities.map(() => null);
+  if (config?.embeddingApiKey && result.entities.length > 0) {
+    try {
+      const canonicals = result.entities.map(e => e.canonical);
+      const batchResult = await embedBatch(canonicals, config.embeddingApiKey);
+      for (let i = 0; i < batchResult.length; i++) {
+        entityEmbeddings[i] = batchResult[i];
       }
+    } catch (err) {
+      log.error(`Failed to batch embed entities`, err);
     }
+  }
+
+  // Deduplicate and insert entities
+  for (let i = 0; i < result.entities.length; i++) {
+    const entity = result.entities[i];
+    const embedding = entityEmbeddings[i];
 
     const existingId = await findDuplicate(pool, entity, embedding, threshold);
 

@@ -342,6 +342,10 @@ export async function updateConceptContent(pool: pg.Pool, conceptId: string, new
   );
 }
 
+export async function updateConceptEmbedding(pool: pg.Pool, id: string, embedding: number[]): Promise<void> {
+  await pool.query('UPDATE concepts SET embedding = $2 WHERE id = $1', [id, JSON.stringify(embedding)]);
+}
+
 export async function insertAuditEntry(
   pool: pg.Pool,
   entry: {
