@@ -15,6 +15,7 @@ import {
   embedText,
   runFactExtraction,
   stripMetadataEnvelope,
+  getExtractionQueue,
 } from "@usme/core";
 import type { ShadowComparison, AssembleResult } from "@usme/core";
 import type { UsmePluginConfig } from "./config.js";
@@ -106,43 +107,42 @@ export async function runShadowAssemble(
       const anthropicKey = process.env.ANTHROPIC_API_KEY ?? "";
       dbg(`ANTHROPIC_API_KEY=${anthropicKey ? "SET" : "MISSING"}`);
       if (anthropicKey) {
-        setImmediate(() => {
-          dbg(`setImmediate fired`);
-          const anthropicClient = new Anthropic({ apiKey: anthropicKey });
-          const serialized = messages
-            .filter((m) => m.role === "user" || m.role === "assistant")
-            .map((m) => {
-              const text = stripMetadataEnvelope(
-                typeof m.content === "string"
-                  ? m.content
-                  : Array.isArray(m.content)
-                    ? (m.content as Array<{type?: string; text?: string; content?: unknown}>)
-                        .flatMap(function extractBlocks(b): string[] {
-                          if (!b || typeof b !== "object") return [];
-                          if (b.type === "text" && typeof b.text === "string") return [b.text];
-                          if (b.content) {
-                            const inner = b.content;
-                            return Array.isArray(inner)
-                              ? inner.flatMap(extractBlocks)
-                              : typeof inner === "string" ? [inner] : [];
-                          }
-                          return [];
-                        })
-                        .join("\n")
-                    : ""
-              );
-              return text.length >= 10 ? `[${m.role}]: ${text}` : null;
-            })
-            .filter((s): s is string => s !== null)
-            .slice(-4) // last 4 non-empty messages — slice AFTER filtering so empty tool results don't consume the window
-            .join("\n\n");
-          runFactExtraction(anthropicClient, pool, {
+        const anthropicClient = new Anthropic({ apiKey: anthropicKey });
+        const serialized = messages
+          .filter((m) => m.role === "user" || m.role === "assistant")
+          .map((m) => {
+            const text = stripMetadataEnvelope(
+              typeof m.content === "string"
+                ? m.content
+                : Array.isArray(m.content)
+                  ? (m.content as Array<{type?: string; text?: string; content?: unknown}>)
+                      .flatMap(function extractBlocks(b): string[] {
+                        if (!b || typeof b !== "object") return [];
+                        if (b.type === "text" && typeof b.text === "string") return [b.text];
+                        if (b.content) {
+                          const inner = b.content;
+                          return Array.isArray(inner)
+                            ? inner.flatMap(extractBlocks)
+                            : typeof inner === "string" ? [inner] : [];
+                        }
+                        return [];
+                      })
+                      .join("\n")
+                  : ""
+            );
+            return text.length >= 10 ? `[${m.role}]: ${text}` : null;
+          })
+          .filter((s): s is string => s !== null)
+          .slice(-4) // last 4 non-empty messages — slice AFTER filtering so empty tool results don't consume the window
+          .join("\n\n");
+        dbg(`enqueuing extraction via ExtractionQueue`);
+        const queue = getExtractionQueue();
+        queue.enqueue(async () => {
+          await runFactExtraction(anthropicClient, pool, {
             sessionId,
             turnIndex: messages.length,
             serializedTurn: serialized,
-          }, { model: config.extraction.model, embeddingApiKey: config.embeddingApiKey }).catch((err) => {
-            console.error("[usme-shadow] extraction failed:", err);
-          });
+          }, { model: config.extraction.model, embeddingApiKey: config.embeddingApiKey });
         });
       }
     }

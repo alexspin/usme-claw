@@ -3,7 +3,7 @@ import type pg from "pg";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { FACT_EXTRACTION_V1 } from "./prompts/fact-extraction-v1.js";
 import { insertSensoryTrace, findSimilarTrace } from "../db/queries.js";
-import { embedText } from "../embed/index.js";
+import { embedBatch } from "../embed/index.js";
 
 export const DEDUP_SIMILARITY_THRESHOLD = 0.95;
 
@@ -14,7 +14,7 @@ function dbg(msg: string) {
 // ── Types ──────────────────────────────────────────────────
 
 export interface ExtractedItem {
-  type: "fact" | "preference" | "decision" | "plan" | "anomaly" | "ephemeral";
+  type: "fact" | "preference" | "decision" | "plan" | "anomaly" | "ephemeral" | "insight";
   content: string;
   utility: "high" | "medium" | "low" | "discard";
   provenance_kind: "user" | "tool" | "model";
@@ -67,7 +67,7 @@ export async function extractFacts(
   const prompt = buildPrompt(ctx.serializedTurn);
 
   const response = await client.messages.create({
-    model: config?.model ?? "claude-haiku-4-5",
+    model: config?.model ?? "claude-haiku-4-20250414",
     max_tokens: config?.maxTokens ?? 2048,
     messages: [{ role: "user", content: prompt }],
   });
@@ -107,23 +107,34 @@ export async function persistExtractedItems(
   dbg(`persistExtractedItems: ${result.items.length} items, apiKey=${embeddingApiKey ? "SET("+embeddingApiKey.slice(0,8)+"...)" : "MISSING"}`);
   const ids: string[] = [];
 
-  for (const item of result.items) {
-    if (item.utility === "discard") { dbg(`skip discard: "${item.content.slice(0,50)}"`); continue; }
+  // Filter out discards first
+  const keepItems = result.items.filter(item => {
+    if (item.utility === "discard") { dbg(`skip discard: "${item.content.slice(0,50)}"`); return false; }
+    return true;
+  });
 
-    // Embed content if API key provided
-    let embedding: number[] | null = null;
-    if (embeddingApiKey) {
-      dbg(`embedding: "${item.content.slice(0,60)}"`);
-      try {
-        embedding = await embedText(item.content, embeddingApiKey);
-        dbg(`embed ok: len=${embedding?.length}`);
-      } catch (err) {
-        dbg(`embed FAILED: ${err}`);
-        log.error(`Failed to embed item, storing without embedding: ${err}`);
+  // Batch embed all non-discard items at once
+  const embeddings: (number[] | null)[] = keepItems.map(() => null);
+  if (embeddingApiKey && keepItems.length > 0) {
+    dbg(`batch embedding ${keepItems.length} items`);
+    try {
+      const contents = keepItems.map(item => item.content);
+      const batchResult = await embedBatch(contents, embeddingApiKey);
+      for (let i = 0; i < batchResult.length; i++) {
+        embeddings[i] = batchResult[i];
       }
-    } else {
-      dbg(`no apiKey — skipping embed`);
+      dbg(`batch embed ok: ${batchResult.length} embeddings`);
+    } catch (err) {
+      dbg(`batch embed FAILED: ${err}`);
+      log.error(`Failed to batch embed items, storing without embeddings: ${err}`);
     }
+  } else {
+    dbg(`no apiKey — skipping embed`);
+  }
+
+  for (let i = 0; i < keepItems.length; i++) {
+    const item = keepItems[i];
+    const embedding = embeddings[i];
 
     // Near-duplicate suppression: skip if a very similar trace already exists
     if (embedding) {

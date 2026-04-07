@@ -15,11 +15,12 @@ vi.mock("../../src/db/queries.js", () => ({
 
 vi.mock("../../src/embed/index.js", () => ({
   embedText: vi.fn().mockResolvedValue([0.1, 0.2, 0.3]),
+  embedBatch: vi.fn().mockResolvedValue([[0.1, 0.2, 0.3]]),
 }));
 
 import { persistExtractedItems } from "../../src/extract/extractor.js";
 import { insertSensoryTrace, findSimilarTrace } from "../../src/db/queries.js";
-import { embedText } from "../../src/embed/index.js";
+import { embedText, embedBatch } from "../../src/embed/index.js";
 import type { FactExtractionResult, ExtractionContext } from "../../src/extract/extractor.js";
 
 const mockPool = {} as any;
@@ -51,6 +52,7 @@ describe("persistExtractedItems dedup logic", () => {
     (insertSensoryTrace as Mock).mockResolvedValue("mock-id-123");
     (findSimilarTrace as Mock).mockResolvedValue(false);
     (embedText as Mock).mockResolvedValue([0.1, 0.2, 0.3]);
+    (embedBatch as Mock).mockResolvedValue([[0.1, 0.2, 0.3]]);
   });
 
   it("skips insert when findSimilarTrace returns true (duplicate found)", async () => {
