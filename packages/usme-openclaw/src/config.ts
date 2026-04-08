@@ -53,18 +53,12 @@ export interface AssemblyConfig {
   };
 }
 
-export interface ShadowConfig {
-  logComparison: boolean;
-  samplingRate: number;
-}
-
 export interface UsmePluginConfig {
   mode: PluginMode;
   db: DbConfig;
   extraction: ExtractionConfig;
   consolidation: ConsolidationConfig;
   assembly: AssemblyConfig;
-  shadow: ShadowConfig;
   embeddingApiKey: string;
 }
 
@@ -102,10 +96,6 @@ export const DEFAULT_CONFIG: UsmePluginConfig = {
       "smart-efficient": { tokenBudget: 15_000 },
     },
   },
-  shadow: {
-    logComparison: true,
-    samplingRate: 1.0,
-  },
   embeddingApiKey: process.env.OPENAI_API_KEY ?? "",
 };
 
@@ -136,7 +126,6 @@ export function resolveConfig(
         ...partial.assembly?.modes,
       },
     },
-    shadow: { ...DEFAULT_CONFIG.shadow, ...partial.shadow },
     embeddingApiKey: process.env.OPENAI_API_KEY || partial.embeddingApiKey || "",
   };
 }

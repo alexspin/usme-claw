@@ -26,14 +26,15 @@ import {
 } from "@usme/core";
 
 import { resolveConfig, type UsmePluginConfig } from "./config.js";
-import {
-  runShadowAssemble,
-  recordShadowComparison,
-  type AgentMessage,
-} from "./shadow.js";
 import { recordTelemetry } from "./telemetry.js";
 
 // ── ContextEngine interface types ────────────────────────────
+
+export interface AgentMessage {
+  role: string;
+  content: string;
+  [key: string]: unknown;
+}
 
 export interface ContextEngineInfo {
   id: string;
@@ -430,41 +431,6 @@ export function createUsmeEngine(
         queryEmbedding,
       };
 
-      // Shadow mode: run concurrently but discard output
-      if (config.mode === "shadow") {
-        const shadowPipelineStart = performance.now();
-        const shadowResult = await runShadowAssemble(getDbPool(), config, sessionId, messages);
-        const shadowTotalMs = performance.now() - shadowPipelineStart;
-
-        // Telemetry: record shadow run (injection skipped in shadow mode)
-        if (shadowResult) {
-          recordTelemetry({
-            sessionId,
-            turnIndex,
-            mode: shadowResult.metadata.mode,
-            timing: {
-              queryEmbeddingMs,
-              dbRetrievalMs: shadowResult.metadata.durationMs * 0.80,
-              scoringAndPackingMs: shadowResult.metadata.durationMs * 0.20,
-              injectionMs: 0,
-              totalMs: shadowTotalMs,
-            },
-            assembleResult: {
-              itemsConsidered: shadowResult.metadata.itemsConsidered,
-              itemsSelected: shadowResult.metadata.itemsSelected,
-              tiersQueried: shadowResult.metadata.tiersQueried,
-              tokenBudget: shadowResult.metadata.tokenBudget,
-              tokensUsed: shadowResult.metadata.tokensUsed,
-              items: shadowResult.items,
-            },
-            injection: { injected: false, reason: "shadow_mode" },
-          });
-        }
-
-        // In shadow mode, return original messages unmodified
-        return { messages, estimatedTokens: 0 };
-      }
-
       // Active mode: run assemble and inject results
       const pipelineStart = performance.now();
       try {
@@ -480,15 +446,6 @@ export function createUsmeEngine(
         const injectionStart = performance.now();
         const systemAddition = injectedToSystemAddition(result.items);
         const injectionMs = performance.now() - injectionStart;
-
-        // Fire-and-forget: record assembly metrics for active mode
-        void recordShadowComparison(
-          getDbPool(),
-          sessionId,
-          messages,
-          result,
-          query || undefined,
-        ).catch(() => {/* ignore */});
 
         // Fire-and-forget: bump access counts for retrieved items
         void bumpAccessCounts(getDbPool(), result.items).catch(() => {/* ignore */});
