@@ -1,36 +1,41 @@
 # usme-claw Build & Deployment Guide
 
+## Single-Copy Architecture
+
+There is ONE copy of the built plugin. esbuild writes directly to the extensions dir. No intermediate dist/ in the source repo.
+
+```
+Source code:    packages/usme-openclaw/src/         ← edit here
+Built output:   .openclaw/extensions/usme-claw/dist/plugin.js  ← what OpenClaw runs
+```
+
+`openclaw.json` has `sourcePath` = `installPath` = `/home/alex/ai/projects/.openclaw/extensions/usme-claw`.
+
+There is no `packages/usme-openclaw/dist/` directory. If one appears (e.g. from a stale build), delete it — it is not used.
+
+---
+
 ## How OpenClaw Loads This Plugin
 
-OpenClaw uses an install record in `openclaw.json` (`plugins.installs.usme-claw`) to track where the plugin lives:
+OpenClaw uses an install record in `openclaw.json` (`plugins.installs.usme-claw`):
 
 ```json
 {
   "source": "path",
-  "sourcePath": "/home/alex/ai/projects/rufus-projects/usme-claw/packages/usme-openclaw",
+  "sourcePath": "/home/alex/ai/projects/.openclaw/extensions/usme-claw",
   "installPath": "/home/alex/ai/projects/.openclaw/extensions/usme-claw"
 }
 ```
 
-**Critical:** OpenClaw loads from `sourcePath`, not `installPath`. The plugin entry point is:
-```
-sourcePath + package.json "main" field
-= packages/usme-openclaw/dist/plugin.js
-```
+Both `sourcePath` and `installPath` are the same directory. OpenClaw:
+1. **Discovers** the plugin by scanning `installPath` for `package.json` with `openclaw.extensions` field
+2. **Loads** the plugin from `sourcePath` + `main` field = `extensions/usme-claw/dist/plugin.js`
 
-However, OpenClaw **discovers** the plugin by scanning `installPath` (the extensions dir) for a `package.json` with an `"openclaw": { "extensions": [...] }` field. Both locations matter:
-
-| Path | Purpose |
-|---|---|
-| `packages/usme-openclaw/dist/plugin.js` | **What OpenClaw runs** |
-| `.openclaw/extensions/usme-claw/package.json` | **What OpenClaw scans for discovery** |
-| `.openclaw/extensions/usme-claw/openclaw.plugin.json` | Plugin metadata (name, configSchema) |
+Since both point to the same dir, they always agree.
 
 ---
 
 ## Build Process
-
-The build lives in `packages/usme-openclaw/`:
 
 ```bash
 cd packages/usme-openclaw
@@ -39,24 +44,22 @@ npm run build
 
 ### What the build does
 
-1. **`tsc --noEmit`** — type-checks the TypeScript source only, no output
-2. **esbuild** — bundles `src/index.ts` into a single self-contained `dist/plugin.js` (~1.5MB)
+1. **`tsc --noEmit`** — type-checks TypeScript source, no output
+2. **esbuild** — bundles `src/index.ts` into `.openclaw/extensions/usme-claw/dist/plugin.js` (~1.5MB)
    - All dependencies (including `@usme/core`) are bundled in
-   - Output: `packages/usme-openclaw/dist/plugin.js` ← **this is what OpenClaw runs**
+   - No external imports at runtime
 3. **postbuild:**
    - Copies `openclaw.plugin.json` → extensions dir (keeps metadata in sync)
-   - Writes `package.json` with `openclaw.extensions` field → extensions dir (required for discovery)
+   - Writes discovery `package.json` with `openclaw.extensions` field → extensions dir
    - Runs `patch-lcm-sqlite.mjs` (SQLite performance patch)
 
 ### Why esbuild, not tsc?
 
-OpenClaw loads the plugin as a standalone file. If `tsc` compiled it, the output would contain `import { ... } from "@usme/core"` — which would fail at runtime because the extensions dir has no access to the monorepo's `node_modules`. esbuild bundles everything into a single file with no external imports.
+OpenClaw loads the plugin as a standalone file. If tsc compiled it, the output would contain `import { ... } from "@usme/core"` — which fails at runtime because the extensions dir has no access to the monorepo's `node_modules`. esbuild bundles everything into one file.
 
 ---
 
 ## Diagnosing Load Problems
-
-Before debugging any plugin behavior, always verify which file is actually being loaded:
 
 **Step 1 — Check the install record:**
 ```bash
@@ -65,13 +68,11 @@ import json,sys; d=json.load(sys.stdin)
 print(json.dumps(d['plugins']['installs']['usme-claw'], indent=2))
 "
 ```
+Both `sourcePath` and `installPath` should be `.openclaw/extensions/usme-claw`.
 
-**Step 2 — Confirm the file OpenClaw runs:**
-```
-sourcePath + "/" + main = packages/usme-openclaw/dist/plugin.js
-```
+**Step 2 — Confirm the built file exists:**
 ```bash
-ls -la packages/usme-openclaw/dist/plugin.js
+ls -la /home/alex/ai/projects/.openclaw/extensions/usme-claw/dist/plugin.js
 ```
 
 **Step 3 — Confirm the discovery file exists:**
@@ -87,7 +88,7 @@ tail -100 /tmp/openclaw/openclaw-$(date +%Y-%m-%d).log | grep usme
 #             [usme] registering hook (mode=active)
 ```
 
-If you see `plugin not found: usme-claw` in the startup output, the `openclaw.extensions` field is missing from the extensions dir `package.json`. Re-run `npm run build` from `packages/usme-openclaw/`.
+If you see `plugin not found: usme-claw`, re-run `npm run build`.
 
 ---
 
@@ -95,37 +96,10 @@ If you see `plugin not found: usme-claw` in the startup output, the `openclaw.ex
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `plugin not found: usme-claw` warning | Extensions dir `package.json` missing `openclaw.extensions` field | Run `npm run build` |
+| `plugin not found: usme-claw` | Discovery `package.json` missing `openclaw.extensions` field | Run `npm run build` |
 | Plugin loads but embeddings fail (401) | `OPENAI_API_KEY` not set in env | Add to `env-secrets.sh` |
-| Old behavior after a code change | Built to wrong path or stale file loaded | Check Step 1-3 above |
-| `@usme/core` import error | tsc output (not esbuild bundle) was loaded | Delete `dist/` and rebuild |
-
----
-
-## File Structure
-
-```
-packages/usme-openclaw/
-  src/
-    index.ts          ← plugin entry point (usmePlugin export default)
-    plugin.ts         ← ContextEngine implementation (createUsmeEngine)
-    config.ts         ← config resolution + defaults
-    telemetry.ts      ← telemetry helpers
-  dist/
-    plugin.js         ← esbuild bundle (what OpenClaw runs) — gitignored
-    plugin.js.map     ← source map — gitignored
-  scripts/
-    patch-lcm-sqlite.mjs  ← SQLite perf patch for lossless-claw
-  openclaw.plugin.json    ← plugin metadata (id, name, configSchema)
-  package.json            ← build scripts, dependencies
-  tsconfig.json           ← extends ../../tsconfig.base.json, noEmit only
-
-.openclaw/extensions/usme-claw/   ← gitignored, rebuilt by postbuild
-  dist/
-    plugin.js         ← symlink/copy not used; OpenClaw loads from sourcePath
-  openclaw.plugin.json  ← copied from source by postbuild
-  package.json          ← written by postbuild; MUST have openclaw.extensions field
-```
+| Old behavior after a code change | Forgot to rebuild | Run `npm run build` |
+| `packages/usme-openclaw/dist/` exists | Stale from old build system | Delete it — it is not used |
 
 ---
 
@@ -151,3 +125,27 @@ packages/usme-openclaw/
 - `active` — retrieves memories and injects context into every prompt
 - `log-only` — runs the pipeline and logs to `/tmp/usme/injection.jsonl` but does not inject
 - `off` — plugin does nothing, no DB connections opened
+
+---
+
+## File Structure
+
+```
+packages/usme-openclaw/
+  src/
+    index.ts          ← plugin entry point (usmePlugin export default)
+    config.ts         ← config resolution + defaults
+    telemetry.ts      ← telemetry helpers
+  scripts/
+    patch-lcm-sqlite.mjs  ← SQLite perf patch for lossless-claw
+  openclaw.plugin.json    ← plugin metadata (id, name, configSchema)
+  package.json            ← build scripts, dependencies
+  tsconfig.json           ← extends ../../tsconfig.base.json, noEmit only
+  NOTE: no dist/ here — esbuild writes directly to extensions dir
+
+.openclaw/extensions/usme-claw/   ← THE only built output location
+  dist/
+    plugin.js         ← esbuild bundle (what OpenClaw runs)
+  openclaw.plugin.json  ← copied from source by postbuild
+  package.json          ← written by postbuild; MUST have openclaw.extensions field
+```

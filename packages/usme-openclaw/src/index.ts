@@ -364,6 +364,7 @@ export default function usmePlugin(api: {
       // ── Fire-and-forget extraction (fact + entity) ────────────────────────
       // Runs after retrieval so it never blocks injection. Uses the same
       // agentMessages already normalized above.
+      dbg(`extraction check: enabled=${config.extraction?.enabled} anthropicKey=${anthropicKey ? 'set' : 'MISSING'}`);
       if (config.extraction?.enabled && anthropicKey) {
         const serializedTurn = agentMessages
           .filter((m) => m.role === "user" || m.role === "assistant")
@@ -375,25 +376,39 @@ export default function usmePlugin(api: {
           .slice(-4)
           .join("\n\n");
 
+        dbg(`serializedTurn length=${serializedTurn.length}`);
         if (serializedTurn) {
           const anthropicClient = new Anthropic({ apiKey: anthropicKey });
           const queue = getExtractionQueue();
+          dbg(`enqueueing fact extraction model=${config.extraction.model}`);
           queue.enqueue(async () => {
-            await runFactExtraction(
-              anthropicClient, pool,
-              { sessionId, turnIndex: agentMessages.filter((m) => m.role === "user").length, serializedTurn },
-              { model: config.extraction.model, embeddingApiKey: config.embeddingApiKey || openaiKey },
-            );
-          });
-          if (config.extraction.entityExtraction?.enabled) {
-            queue.enqueue(async () => {
-              await runEntityExtraction(
+            dbg(`runFactExtraction START`);
+            try {
+              await runFactExtraction(
                 anthropicClient, pool,
-                serializedTurn,
-                { model: config.extraction.entityExtraction.model, embeddingApiKey: config.embeddingApiKey || openaiKey },
+                { sessionId, turnIndex: agentMessages.filter((m) => m.role === "user").length, serializedTurn },
+                { model: config.extraction.model, embeddingApiKey: config.embeddingApiKey || openaiKey },
               );
+              dbg(`runFactExtraction OK`);
+            } catch (err) { dbg(`runFactExtraction ERROR: ${err instanceof Error ? err.message : String(err)}`); }
+          });
+          const entityEnabled = config.extraction.entityExtraction?.enabled;
+          dbg(`entity extraction enabled=${entityEnabled}`);
+          if (entityEnabled) {
+            queue.enqueue(async () => {
+              dbg(`runEntityExtraction START`);
+              try {
+                await runEntityExtraction(
+                  anthropicClient, pool,
+                  serializedTurn,
+                  { model: config.extraction.entityExtraction.model, embeddingApiKey: config.embeddingApiKey || openaiKey },
+                );
+                dbg(`runEntityExtraction OK`);
+              } catch (err) { dbg(`runEntityExtraction ERROR: ${err instanceof Error ? err.message : String(err)}`); }
             });
           }
+        } else {
+          dbg(`extraction skipped: serializedTurn empty`);
         }
       }
 

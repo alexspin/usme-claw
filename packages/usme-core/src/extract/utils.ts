@@ -6,6 +6,9 @@
  */
 export function stripMetadataEnvelope(content: string): string {
   let s = content;
+  // Strip USME injected context block (prevents feedback loop when usme-context
+  // is prepended to the conversation and becomes the "last user message")
+  s = s.replace(/<usme-context>[\s\S]*?<\/usme-context>\s*/g, '');
   // Strip "Sender (untrusted metadata): ... ``` fence" block
   s = s.replace(/^Sender \(untrusted metadata\):[\s\S]*?```\n\n?/m, '');
   // Strip leading timestamp line: [Mon 2026-04-06 15:21 UTC]
