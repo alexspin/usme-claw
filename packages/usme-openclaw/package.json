@@ -6,7 +6,7 @@
   "types": "dist/plugin.d.ts",
   "scripts": {
     "build": "tsc --noEmit && esbuild src/index.ts --bundle --platform=node --format=esm --outfile=../../../../.openclaw/extensions/usme-claw/dist/plugin.js",
-    "postbuild": "node scripts/patch-lcm-sqlite.mjs",
+    "postbuild": "cp openclaw.plugin.json ../../../../.openclaw/extensions/usme-claw/openclaw.plugin.json && node scripts/patch-lcm-sqlite.mjs",
     "test": "vitest run"
   },
   "openclaw": {
