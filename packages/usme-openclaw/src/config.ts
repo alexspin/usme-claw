@@ -4,7 +4,16 @@
 
 import type { AssemblyMode } from "@usme/core";
 
-export type PluginMode = "shadow" | "active" | "disabled";
+/**
+ * Plugin operating mode.
+ *
+ *   active    — retrieval + assembly pipeline runs; context injected into prompt via prependContext.
+ *   log-only  — same pipeline as active, but nothing injected; writes identical log entry.
+ *   off       — USME does nothing; no hooks, no DB connections, no scheduler.
+ *
+ * Legacy values: "shadow" (treated as "log-only"), "disabled" (treated as "off").
+ */
+export type PluginMode = "active" | "log-only" | "off" | "shadow" | "disabled";
 
 export interface DbConfig {
   host: string;
@@ -60,7 +69,7 @@ export interface UsmePluginConfig {
 }
 
 export const DEFAULT_CONFIG: UsmePluginConfig = {
-  mode: "shadow",
+  mode: "log-only",
   db: {
     host: "localhost",
     port: 5432,

@@ -31,6 +31,7 @@ import {
   recordShadowComparison,
   type AgentMessage,
 } from "./shadow.js";
+import { recordTelemetry } from "./telemetry.js";
 
 // ── ContextEngine interface types ────────────────────────────
 
@@ -413,6 +414,7 @@ export function createUsmeEngine(
       const warmedEmbeddingPromise = warmCache.get(sessionId);
       warmCache.delete(sessionId); // consume — one-shot per turn
 
+      const embedStart = performance.now();
       let queryEmbedding: number[];
       if (warmedEmbeddingPromise) {
         queryEmbedding = await warmedEmbeddingPromise;
@@ -421,6 +423,7 @@ export function createUsmeEngine(
           ? await embedText(query, config.embeddingApiKey)
           : zeroEmbedding();
       }
+      const queryEmbeddingMs = performance.now() - embedStart;
 
       const assembleOptions: AssembleOptions = {
         pool: getDbPool(),
@@ -429,16 +432,54 @@ export function createUsmeEngine(
 
       // Shadow mode: run concurrently but discard output
       if (config.mode === "shadow") {
-        await runShadowAssemble(getDbPool(), config, sessionId, messages);
+        const shadowPipelineStart = performance.now();
+        const shadowResult = await runShadowAssemble(getDbPool(), config, sessionId, messages);
+        const shadowTotalMs = performance.now() - shadowPipelineStart;
+
+        // Telemetry: record shadow run (injection skipped in shadow mode)
+        if (shadowResult) {
+          recordTelemetry({
+            sessionId,
+            turnIndex,
+            mode: shadowResult.metadata.mode,
+            timing: {
+              queryEmbeddingMs,
+              dbRetrievalMs: shadowResult.metadata.durationMs * 0.80,
+              scoringAndPackingMs: shadowResult.metadata.durationMs * 0.20,
+              injectionMs: 0,
+              totalMs: shadowTotalMs,
+            },
+            assembleResult: {
+              itemsConsidered: shadowResult.metadata.itemsConsidered,
+              itemsSelected: shadowResult.metadata.itemsSelected,
+              tiersQueried: shadowResult.metadata.tiersQueried,
+              tokenBudget: shadowResult.metadata.tokenBudget,
+              tokensUsed: shadowResult.metadata.tokensUsed,
+              items: shadowResult.items,
+            },
+            injection: { injected: false, reason: "shadow_mode" },
+          });
+        }
 
         // In shadow mode, return original messages unmodified
         return { messages, estimatedTokens: 0 };
       }
 
       // Active mode: run assemble and inject results
+      const pipelineStart = performance.now();
       try {
+        const retrieveStart = performance.now();
         const result = await coreAssemble(assembleRequest, assembleOptions);
+        // assemble() internally does retrieve -> score -> pack; we split via its reported durationMs
+        // retrieve dominates; scoring/packing is in-process and fast
+        const assembleTotalMs = performance.now() - retrieveStart;
+        // Heuristic split: pgvector ANN is ~80% of assemble time, in-process scoring ~20%
+        const dbRetrievalMs = assembleTotalMs * 0.80;
+        const scoringAndPackingMs = assembleTotalMs * 0.20;
+
+        const injectionStart = performance.now();
         const systemAddition = injectedToSystemAddition(result.items);
+        const injectionMs = performance.now() - injectionStart;
 
         // Fire-and-forget: record assembly metrics for active mode
         void recordShadowComparison(
@@ -463,6 +504,32 @@ export function createUsmeEngine(
               ...messages,
             ]
           : messages;
+
+        // Telemetry: record timing + context block (fire-and-forget)
+        const totalMs = performance.now() - pipelineStart;
+        recordTelemetry({
+          sessionId,
+          turnIndex,
+          mode: result.metadata.mode,
+          timing: {
+            queryEmbeddingMs,
+            dbRetrievalMs,
+            scoringAndPackingMs,
+            injectionMs,
+            totalMs,
+          },
+          assembleResult: {
+            itemsConsidered: result.metadata.itemsConsidered,
+            itemsSelected: result.metadata.itemsSelected,
+            tiersQueried: result.metadata.tiersQueried,
+            tokenBudget: result.metadata.tokenBudget,
+            tokensUsed: result.metadata.tokensUsed,
+            items: result.items,
+          },
+          injection: result.items.length > 0
+            ? { injected: true, reason: "active_mode_items_selected" }
+            : { injected: false, reason: "no_items_selected" },
+        });
 
         return {
           messages: finalMessages,
