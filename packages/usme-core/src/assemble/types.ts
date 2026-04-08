@@ -58,6 +58,8 @@ export interface RetrievalCandidate {
   teachability: number | null;
   /** Semantic labels attached to this memory item. Empty array when not available. */
   tags: string[];
+  /** Cosine similarity to query, computed by pgvector. Range [0, 1]. */
+  similarity: number;
 }
 
 export interface ScoredCandidate extends RetrievalCandidate {

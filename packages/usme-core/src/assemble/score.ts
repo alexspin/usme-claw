@@ -51,15 +51,14 @@ export function scoreCandidates(
   queryEmbedding: number[],
   now: Date = new Date(),
 ): ScoredCandidate[] {
-  return candidates.map((c) => scoreCandidate(c, queryEmbedding, now));
+  return candidates.map((c) => scoreCandidate(c, now));
 }
 
 function scoreCandidate(
   candidate: RetrievalCandidate,
-  queryEmbedding: number[],
   now: Date,
 ): ScoredCandidate {
-  const sim = cosineSimilarity(candidate.embedding, queryEmbedding);
+  const sim = candidate.similarity;
   const rec = recencyDecay(candidate.createdAt, now, HALF_LIFE_DAYS[candidate.tier]);
   const prov = PROVENANCE_SCORES[candidate.provenanceKind] ?? 0.5;
   const acc = accessFrequencyScore(candidate.accessCount, candidate.lastAccessed, now);

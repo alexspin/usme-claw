@@ -7,8 +7,6 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import type { Pool } from "pg";
-import { appendFileSync, mkdirSync } from "node:fs";
-function dbg(msg: string) { try { mkdirSync("/tmp/usme-debug", { recursive: true }); appendFileSync("/tmp/usme-debug/shadow.log", `[${new Date().toISOString()}] ${msg}\n`); } catch {} }
 import {
   insertShadowComparison,
   assemble,
@@ -16,10 +14,13 @@ import {
   runFactExtraction,
   stripMetadataEnvelope,
   getExtractionQueue,
+  logger,
 } from "@usme/core";
 import type { ShadowComparison, AssembleResult } from "@usme/core";
 import type { UsmePluginConfig } from "./config.js";
 import { injectedToSystemAddition, extractText } from "./plugin.js";
+
+const log = logger.child({ module: "shadow" });
 
 export interface AgentMessage {
   role: string;
@@ -29,26 +30,13 @@ export interface AgentMessage {
 
 /**
  * Compute overlap score between USME items and LCM messages.
- * Simple token-level overlap ratio.
+ * Word-bag Jaccard removed — use vector similarity from pgvector instead.
  */
 export function computeOverlapScore(
-  usmeContent: string[],
-  lcmContent: string[],
+  _usmeContent: string[],
+  _lcmContent: string[],
 ): number {
-  const usmeTokens = new Set(
-    usmeContent.join(" ").toLowerCase().split(/\s+/),
-  );
-  const lcmTokens = new Set(lcmContent.join(" ").toLowerCase().split(/\s+/));
-
-  if (usmeTokens.size === 0 && lcmTokens.size === 0) return 1.0;
-  if (usmeTokens.size === 0 || lcmTokens.size === 0) return 0.0;
-
-  let overlap = 0;
-  for (const t of usmeTokens) {
-    if (lcmTokens.has(t)) overlap++;
-  }
-  const union = new Set([...usmeTokens, ...lcmTokens]).size;
-  return overlap / union;
+  return 0;
 }
 
 /**
@@ -82,9 +70,9 @@ export async function runShadowAssemble(
       : JSON.stringify(lastUserMessage.content);
     const cleanQuery = stripMetadataEnvelope(extractText(rawContent));
 
-    dbg(`embedText for query: "${cleanQuery.slice(0,80)}" apiKey=${config.embeddingApiKey ? "SET" : "MISSING"}`);
+    log.debug({ queryPreview: cleanQuery.slice(0, 80) }, "embedText for shadow query");
     const queryEmbedding = await embedText(cleanQuery, config.embeddingApiKey);
-    dbg(`embedText OK: dimensions=${queryEmbedding?.length}`);
+    log.debug({ dimensions: queryEmbedding?.length }, "embedText OK");
 
     const request = {
       query: cleanQuery,
@@ -95,17 +83,18 @@ export async function runShadowAssemble(
       turnIndex: messages.length,
     };
 
-    dbg(`assemble() calling with mode=${request.mode} budget=${request.tokenBudget}`);
     const assembleResult = await assemble(request, { pool, queryEmbedding });
-    dbg(`assemble() OK: selected=${assembleResult.metadata.itemsSelected} considered=${assembleResult.metadata.itemsConsidered} tiers=${assembleResult.metadata.tiersQueried}`);
+    log.debug({
+      selected: assembleResult.metadata.itemsSelected,
+      considered: assembleResult.metadata.itemsConsidered,
+      tiers: assembleResult.metadata.tiersQueried,
+    }, "assemble() OK");
 
     await recordShadowComparison(pool, sessionId, messages, assembleResult, cleanQuery);
 
     // Fire-and-forget extraction: serialize the last user message and extract facts
-    dbg(`extraction check: enabled=${config.extraction.enabled} embeddingApiKey=${config.embeddingApiKey ? "SET("+config.embeddingApiKey.slice(0,8)+"...)" : "MISSING"}`);
     if (config.extraction.enabled) {
       const anthropicKey = process.env.ANTHROPIC_API_KEY ?? "";
-      dbg(`ANTHROPIC_API_KEY=${anthropicKey ? "SET" : "MISSING"}`);
       if (anthropicKey) {
         const anthropicClient = new Anthropic({ apiKey: anthropicKey });
         const serialized = messages
@@ -135,7 +124,6 @@ export async function runShadowAssemble(
           .filter((s): s is string => s !== null)
           .slice(-4) // last 4 non-empty messages — slice AFTER filtering so empty tool results don't consume the window
           .join("\n\n");
-        dbg(`enqueuing extraction via ExtractionQueue`);
         const queue = getExtractionQueue();
         queue.enqueue(async () => {
           await runFactExtraction(anthropicClient, pool, {
@@ -149,8 +137,7 @@ export async function runShadowAssemble(
 
     return assembleResult;
   } catch (err) {
-    dbg(`runShadowAssemble CAUGHT ERROR: ${err instanceof Error ? err.stack : err}`);
-    console.error("[usme-shadow] assemble() failed, degrading gracefully:", err);
+    log.error({ err }, "runShadowAssemble failed, degrading gracefully");
     return null;
   }
 }

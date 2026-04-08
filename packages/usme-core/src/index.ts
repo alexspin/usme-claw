@@ -1,3 +1,4 @@
+export { logger } from "./logger.js";
 export { getPool, closePool } from "./db/pool.js";
 export type { PoolOptions } from "./db/pool.js";
 export * from "./db/queries.js";

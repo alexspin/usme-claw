@@ -1,15 +1,12 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { z } from "zod";
 import type pg from "pg";
-import { appendFileSync, mkdirSync } from "node:fs";
 import { FACT_EXTRACTION_V1 } from "./prompts/fact-extraction-v1.js";
 import { insertSensoryTrace, findSimilarTrace } from "../db/queries.js";
 import { embedBatch } from "../embed/index.js";
+import { logger } from "../logger.js";
 
 export const DEDUP_SIMILARITY_THRESHOLD = 0.95;
-
-function dbg(msg: string) {
-  try { mkdirSync("/tmp/usme-debug", { recursive: true }); appendFileSync("/tmp/usme-debug/extractor.log", `[${new Date().toISOString()}] ${msg}\n`); } catch {}
-}
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -22,9 +19,20 @@ export interface ExtractedItem {
   ephemeral_ttl_hours: number | null;
 }
 
-export interface FactExtractionResult {
-  items: ExtractedItem[];
-}
+const FactItemSchema = z.object({
+  content: z.string(),
+  fact_type: z.string(),
+  utility: z.enum(["high", "medium", "low", "discard"]),
+  confidence: z.number().min(0).max(1),
+  provenance_kind: z.string().optional(),
+  tags: z.array(z.string()).optional(),
+});
+
+const FactExtractionResultSchema = z.object({
+  items: z.array(FactItemSchema),
+});
+
+export type FactExtractionResult = z.infer<typeof FactExtractionResultSchema>;
 
 export interface ExtractionContext {
   sessionId: string;
@@ -39,12 +47,7 @@ export interface ExtractorConfig {
 
 // ── Logger ─────────────────────────────────────────────────
 
-const log = {
-  info: (msg: string, data?: unknown) =>
-    console.log(`[usme:extract] ${msg}`, data ?? ""),
-  error: (msg: string, err?: unknown) =>
-    console.error(`[usme:extract] ERROR ${msg}`, err ?? ""),
-};
+const log = logger.child({ module: "extractor" });
 
 // ── Core Extraction ────────────────────────────────────────
 
@@ -67,33 +70,49 @@ export async function extractFacts(
   const prompt = buildPrompt(ctx.serializedTurn);
 
   const response = await client.messages.create({
-    model: config?.model ?? "claude-haiku-4-20250414",
+    model: config?.model ?? "claude-haiku-4-5",
     max_tokens: config?.maxTokens ?? 2048,
+    tools: [{
+      name: "extract_facts",
+      description: "Extract factual items from the conversation turn",
+      input_schema: {
+        type: "object" as const,
+        properties: {
+          items: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                content: { type: "string" },
+                fact_type: { type: "string" },
+                utility: { type: "string", enum: ["high", "medium", "low", "discard"] },
+                confidence: { type: "number" },
+                provenance_kind: { type: "string" },
+                tags: { type: "array", items: { type: "string" } },
+              },
+              required: ["content", "fact_type", "utility", "confidence"],
+            },
+          },
+        },
+        required: ["items"],
+      },
+    }],
+    tool_choice: { type: "tool", name: "extract_facts" },
     messages: [{ role: "user", content: prompt }],
   });
 
-  const text =
-    response.content[0].type === "text" ? response.content[0].text : "";
-
-  dbg(`raw haiku response (${text.length} chars): ${JSON.stringify(text.slice(0, 300))}`);
-
-  // Robustly extract JSON: find outermost { ... } block, ignoring any surrounding text/fences
-  const jsonStart = text.indexOf("{");
-  const jsonEnd = text.lastIndexOf("}");
-  if (jsonStart === -1 || jsonEnd === -1 || jsonEnd <= jsonStart) {
-    dbg(`no JSON object found in response`);
-    throw new Error(`Fact extraction: no JSON object found in response. Raw: ${text.slice(0, 200)}`);
-  }
-  const jsonText = text.slice(jsonStart, jsonEnd + 1);
-  dbg(`extracted JSON (${jsonText.length} chars): ${jsonText.slice(0, 200)}`);
-
-  const parsed = JSON.parse(jsonText) as FactExtractionResult;
-
-  if (!Array.isArray(parsed.items)) {
-    throw new Error("Fact extraction returned invalid structure: missing items array");
+  const toolBlock = response.content.find((b) => b.type === "tool_use");
+  if (!toolBlock || toolBlock.type !== "tool_use") {
+    log.warn("no tool_use block in extraction response");
+    return { items: [] };
   }
 
-  return parsed;
+  const parsed = FactExtractionResultSchema.safeParse(toolBlock.input);
+  if (!parsed.success) {
+    log.error({ error: parsed.error }, "extraction schema validation failed");
+    return { items: [] };
+  }
+  return parsed.data;
 }
 
 // ── Persist to DB ──────────────────────────────────────────
@@ -104,32 +123,24 @@ export async function persistExtractedItems(
   result: FactExtractionResult,
   embeddingApiKey?: string,
 ): Promise<string[]> {
-  dbg(`persistExtractedItems: ${result.items.length} items, apiKey=${embeddingApiKey ? "SET("+embeddingApiKey.slice(0,8)+"...)" : "MISSING"}`);
   const ids: string[] = [];
 
   // Filter out discards first
-  const keepItems = result.items.filter(item => {
-    if (item.utility === "discard") { dbg(`skip discard: "${item.content.slice(0,50)}"`); return false; }
-    return true;
-  });
+  const keepItems = result.items.filter(item => item.utility !== "discard");
 
   // Batch embed all non-discard items at once
   const embeddings: (number[] | null)[] = keepItems.map(() => null);
   if (embeddingApiKey && keepItems.length > 0) {
-    dbg(`batch embedding ${keepItems.length} items`);
+    log.debug({ count: keepItems.length }, "batch embedding items");
     try {
       const contents = keepItems.map(item => item.content);
       const batchResult = await embedBatch(contents, embeddingApiKey);
       for (let i = 0; i < batchResult.length; i++) {
         embeddings[i] = batchResult[i];
       }
-      dbg(`batch embed ok: ${batchResult.length} embeddings`);
     } catch (err) {
-      dbg(`batch embed FAILED: ${err}`);
-      log.error(`Failed to batch embed items, storing without embeddings: ${err}`);
+      log.error({ err }, "Failed to batch embed items, storing without embeddings");
     }
-  } else {
-    dbg(`no apiKey — skipping embed`);
   }
 
   for (let i = 0; i < keepItems.length; i++) {
@@ -141,38 +152,34 @@ export async function persistExtractedItems(
       try {
         const isDuplicate = await findSimilarTrace(pool, embedding, DEDUP_SIMILARITY_THRESHOLD);
         if (isDuplicate) {
-          dbg(`skip near-duplicate (similarity>${DEDUP_SIMILARITY_THRESHOLD}): "${item.content.slice(0,60)}"`);
           log.info(`Skipped near-duplicate item: "${item.content.slice(0, 80)}"`);
           continue;
         }
       } catch (err) {
-        dbg(`findSimilarTrace FAILED (continuing without dedup): ${err}`);
+        log.debug({ err }, "findSimilarTrace failed (continuing without dedup)");
       }
     }
 
-    dbg(`insertSensoryTrace: "${item.content.slice(0,60)}" embLen=${embedding?.length ?? 0}`);
     try {
       const id = await insertSensoryTrace(pool, {
         session_id: ctx.sessionId,
         turn_index: ctx.turnIndex,
         item_type: "extracted",
-        memory_type: item.type,
+        memory_type: item.fact_type as ExtractedItem["type"],
         content: item.content,
         embedding,
-        provenance_kind: item.provenance_kind,
+        provenance_kind: (item.provenance_kind ?? "model") as ExtractedItem["provenance_kind"],
         provenance_ref: null,
         utility_prior: item.utility,
-        tags: item.tags,
+        tags: item.tags ?? [],
         extractor_ver: FACT_EXTRACTION_V1.version,
         metadata: {},
         episodified_at: null,
-        expires_at: computeExpiresAt(item.ephemeral_ttl_hours),
+        expires_at: computeExpiresAt(null),
       });
-      dbg(`insertSensoryTrace OK: id=${id}`);
       ids.push(id);
     } catch (err) {
-      dbg(`insertSensoryTrace CAUGHT ERROR: ${err}`);
-      log.error(`Failed to insert sensory trace`, err);
+      log.error({ err }, "Failed to insert sensory trace");
     }
   }
 
@@ -191,16 +198,13 @@ export async function runFactExtraction(
   ctx: ExtractionContext,
   config?: ExtractorConfig & { embeddingApiKey?: string },
 ): Promise<void> {
-  dbg(`runFactExtraction: session=${ctx.sessionId} turn=${ctx.turnIndex} embeddingApiKey=${config?.embeddingApiKey ? "SET" : "MISSING"}`);
   try {
     const result = await extractFacts(client, ctx, config);
-    dbg(`extractFacts returned ${result.items.length} items`);
     await persistExtractedItems(pool, ctx, result, config?.embeddingApiKey);
   } catch (err) {
-    dbg(`runFactExtraction CAUGHT ERROR: ${err}`);
     log.error(
+      { err },
       `Fact extraction failed for session=${ctx.sessionId} turn=${ctx.turnIndex}`,
-      err,
     );
     // Non-blocking: swallow error, extraction is best-effort
   }

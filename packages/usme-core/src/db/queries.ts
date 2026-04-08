@@ -1,5 +1,4 @@
 import type pg from "pg";
-import { appendFileSync, mkdirSync } from "node:fs";
 import type {
   SensoryTrace,
   Episode,
@@ -9,10 +8,6 @@ import type {
   EntityRelationship,
   ShadowComparison,
 } from "../schema/types.js";
-
-function dbg(msg: string) {
-  try { mkdirSync("/tmp/usme-debug", { recursive: true }); appendFileSync("/tmp/usme-debug/queries.log", `[${new Date().toISOString()}] ${msg}\n`); } catch {}
-}
 
 /** Format a number[] embedding as pgvector literal, or null. */
 function vecLiteral(embedding: number[] | null | undefined): string | null {
@@ -26,7 +21,6 @@ export async function insertSensoryTrace(
   trace: Omit<SensoryTrace, "id" | "created_at">,
 ): Promise<string> {
   const vec = vecLiteral(trace.embedding);
-  dbg(`insertSensoryTrace: session=${trace.session_id} turn=${trace.turn_index} hasEmbedding=${!!vec} vecLen=${trace.embedding?.length ?? 0}`);
   try {
     const { rows } = await pool.query(
       `INSERT INTO sensory_trace
@@ -42,10 +36,8 @@ export async function insertSensoryTrace(
         trace.expires_at,
       ],
     );
-    dbg(`insertSensoryTrace: OK id=${rows[0].id}`);
     return rows[0].id;
   } catch (err) {
-    dbg(`insertSensoryTrace: CAUGHT ERROR: ${err}`);
     throw err;
   }
 }

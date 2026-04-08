@@ -11,6 +11,7 @@
  */
 
 import Anthropic from "@anthropic-ai/sdk";
+import { z } from "zod";
 import type pg from "pg";
 import {
   getUnepisodifiedTraces,
@@ -23,6 +24,8 @@ import {
 import { stepReconcile } from "./reconcile.js";
 import { embedText } from "../embed/index.js";
 import type { SensoryTrace } from "../schema/types.js";
+import { logger } from "../logger.js";
+import { countTokens } from "../tokenize.js";
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -53,12 +56,55 @@ export interface NightlyResult {
 
 // ── Logger ─────────────────────────────────────────────────
 
-const log = {
-  info: (msg: string, data?: unknown) =>
-    console.log(`[usme:consolidation] ${msg}`, data ?? ""),
-  error: (msg: string, err?: unknown) =>
-    console.error(`[usme:consolidation] ERROR ${msg}`, err ?? ""),
-};
+const log = logger.child({ module: "nightly" });
+
+// ── Schemas ────────────────────────────────────────────────
+
+const ConceptSchema = z.object({
+  concept_type: z.enum(["fact", "preference", "decision", "relationship_summary"]),
+  content: z.string().max(500),
+  confidence: z.number().min(0).max(1),
+  provenance_kind: z.literal("model"),
+  tags: z.array(z.string()),
+});
+
+const PromoteOutputSchema = z.object({
+  concepts: z.array(ConceptSchema),
+});
+
+const ContradictionOutputSchema = z.object({
+  contradicts: z.boolean(),
+  resolution: z.enum(["keep_a", "keep_b", "merge"]),
+  merged_content: z.string().nullable(),
+  reasoning: z.string(),
+});
+
+const SkillSchema = z.object({
+  name: z.string(),
+  description: z.string(),
+  teachability: z.number().min(0).max(1),
+});
+
+const SkillDraftOutputSchema = z.object({
+  skills: z.array(SkillSchema),
+});
+
+// ── Helpers ────────────────────────────────────────────────
+
+function extractToolInput(response: Anthropic.Message, toolName: string): unknown {
+  const block = response.content.find((b): b is Anthropic.ToolUseBlock => b.type === "tool_use" && b.name === toolName);
+  if (!block) throw new Error(`No tool_use block with name "${toolName}" in response`);
+  return block.input;
+}
+
+function chunkArray<T>(arr: T[], k: number): T[][] {
+  const chunkSize = Math.ceil(arr.length / k);
+  const chunks: T[][] = [];
+  for (let i = 0; i < arr.length; i += chunkSize) {
+    chunks.push(arr.slice(i, i + chunkSize));
+  }
+  return chunks;
+}
 
 // ── Step 1: Episodify ──────────────────────────────────────
 
@@ -124,7 +170,7 @@ export async function stepEpisodify(
         summary,
         embedding: null,
         source_trace_ids: chunk.map((t) => t.id),
-        token_count: Math.ceil(summary.length / 4),
+        token_count: countTokens(summary),
         utility_score: 0.5,
         metadata: { clustered_at: new Date().toISOString() },
       });
@@ -138,7 +184,7 @@ export async function stepEpisodify(
           );
           log.info(`embedded episode ${episodeId}`);
         } catch (err) {
-          log.error(`embed episode ${episodeId} failed`, err);
+          log.error({ err }, `embed episode ${episodeId} failed`);
         }
       }
 
@@ -181,39 +227,47 @@ export async function stepPromote(
 
   const response = await client.messages.create({
     model: config.sonnetModel ?? "claude-sonnet-4-5",
-    max_tokens: 2048,
+    max_tokens: 8192,
+    tools: [{
+      name: "promote_concepts",
+      description: "Extract recurring facts, preferences, or decisions worth promoting to long-term concepts.",
+      input_schema: {
+        type: "object" as const,
+        properties: {
+          concepts: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                concept_type: { type: "string", enum: ["fact", "preference", "decision", "relationship_summary"] },
+                content: { type: "string", description: "Concise statement, max 300 chars" },
+                confidence: { type: "number" },
+                provenance_kind: { type: "string", enum: ["model"] },
+                tags: { type: "array", items: { type: "string" } },
+              },
+              required: ["concept_type", "content", "confidence", "provenance_kind", "tags"],
+            },
+            maxItems: 10,
+          },
+        },
+        required: ["concepts"],
+      },
+    }],
+    tool_choice: { type: "tool", name: "promote_concepts" },
     messages: [
       {
         role: "user",
-        content: `Analyze these episode summaries and extract any recurring facts, preferences, or decisions that should be promoted to stable long-term concepts.\n\nEpisodes:\n${serialized}\n\nRespond with valid JSON:\n{\n  "concepts": [\n    {\n      "concept_type": "fact|preference|decision|relationship_summary",\n      "content": "concise statement",\n      "confidence": 0.0-1.0,\n      "provenance_kind": "model",\n      "tags": ["tag1"]\n    }\n  ]\n}\n\nIf no concepts are worth promoting, return: { "concepts": [] }`,
+        content: `Analyze these episode summaries and extract up to 10 of the most important recurring facts, preferences, or decisions that should be promoted to stable long-term concepts. Keep each "content" field under 200 characters. If no concepts are worth promoting, return an empty array.\n\nEpisodes:\n${serialized}`,
       },
     ],
   });
 
-  const text = stripJsonFences(
-    response.content[0].type === "text" ? response.content[0].text : "{}"
-  );
-
-  let concepts: Array<{
-    concept_type: string;
-    content: string;
-    confidence: number;
-    provenance_kind: string;
-    tags: string[];
-  }> = [];
-
-  try {
-    const parsed = JSON.parse(stripJsonFences(text));
-    concepts = parsed.concepts ?? [];
-  } catch {
-    log.error("Step 2: Failed to parse concept promotion response");
-    return 0;
-  }
+  const { concepts } = PromoteOutputSchema.parse(extractToolInput(response, "promote_concepts"));
 
   let promoted = 0;
   for (const c of concepts) {
     const conceptId = await insertConcept(pool, {
-      concept_type: c.concept_type as "fact" | "preference" | "decision" | "relationship_summary",
+      concept_type: c.concept_type,
       content: c.content,
       embedding: null,
       utility_score: 0.5,
@@ -235,7 +289,7 @@ export async function stepPromote(
         );
         log.info(`embedded concept ${conceptId}`);
       } catch (err) {
-        log.error(`embed concept ${conceptId} failed`, err);
+        log.error({ err }, `embed concept ${conceptId} failed`);
       }
     }
     promoted++;
@@ -249,8 +303,6 @@ export async function stepPromote(
        WHERE id = ANY($1)`,
       [episodeIds],
     );
-  } else {
-    console.log('[stepPromote] skipping markEpisodesPromoted — no concepts extracted from batch');
   }
 
   log.info(`Step 2: Promoted ${promoted} concepts from ${episodes.length} episodes`);
@@ -295,19 +347,31 @@ export async function stepContradictions(
     const response = await client.messages.create({
       model: config.sonnetModel ?? "claude-sonnet-4-5",
       max_tokens: 1024,
+      tools: [{
+        name: "resolve_contradiction",
+        description: "Analyze two memory concepts and decide how to resolve any contradiction between them.",
+        input_schema: {
+          type: "object" as const,
+          properties: {
+            contradicts: { type: "boolean" },
+            resolution: { type: "string", enum: ["keep_a", "keep_b", "merge"] },
+            merged_content: { type: ["string", "null"], description: "Merged statement if resolution is merge, otherwise null" },
+            reasoning: { type: "string" },
+          },
+          required: ["contradicts", "resolution", "merged_content", "reasoning"],
+        },
+      }],
+      tool_choice: { type: "tool", name: "resolve_contradiction" },
       messages: [
         {
           role: "user",
-          content: `These two memory concepts may contradict each other. Analyze and decide:\n\nConcept A: "${pair.content_a}"\nConcept B: "${pair.content_b}"\n\nRespond with valid JSON:\n{\n  "contradicts": true/false,\n  "resolution": "keep_a" | "keep_b" | "merge",\n  "merged_content": "merged statement if resolution is merge, otherwise null",\n  "reasoning": "brief explanation"\n}`,
+          content: `These two memory concepts may contradict each other. Analyze and decide:\n\nConcept A: "${pair.content_a}"\nConcept B: "${pair.content_b}"`,
         },
       ],
     });
 
-    const text =
-      response.content[0].type === "text" ? response.content[0].text : "{}";
-
     try {
-      const decision = JSON.parse(text);
+      const decision = ContradictionOutputSchema.parse(extractToolInput(response, "resolve_contradiction"));
 
       if (!decision.contradicts) continue;
 
@@ -345,7 +409,7 @@ export async function stepContradictions(
             );
             log.info(`embedded concept ${newId}`);
           } catch (err) {
-            log.error(`embed concept ${newId} failed`, err);
+            log.error({ err }, `embed concept ${newId} failed`);
           }
         }
         await deactivateConcept(pool, pair.id_a, newId);
@@ -396,28 +460,39 @@ export async function stepSkillDraft(
 
   const response = await client.messages.create({
     model: config.opusModel ?? config.sonnetModel ?? "claude-sonnet-4-5",
-    max_tokens: 2048,
+    max_tokens: 4096,
+    tools: [{
+      name: "draft_skill",
+      description: "Identify repeatable workflows or procedures from episode summaries and draft them as reusable skill candidates.",
+      input_schema: {
+        type: "object" as const,
+        properties: {
+          skills: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                name: { type: "string", description: "Concise skill name" },
+                description: { type: "string", description: "What the skill does and how to apply it" },
+                teachability: { type: "number", description: "0.0 to 1.0, where 1.0 means easily replicable" },
+              },
+              required: ["name", "description", "teachability"],
+            },
+          },
+        },
+        required: ["skills"],
+      },
+    }],
+    tool_choice: { type: "tool", name: "draft_skill" },
     messages: [
       {
         role: "user",
-        content: `Analyze these episode summaries and identify any repeatable workflows, procedures, or techniques that could be extracted as reusable "skills" (templates for future tasks).\n\nEpisodes:\n${serialized}\n\nFor each skill candidate, provide:\n- A concise name\n- A description of the procedure\n- How teachable it is (0.0 to 1.0, where 1.0 means easily replicable)\n\nRespond with valid JSON:\n{\n  "skills": [\n    {\n      "name": "skill-name",\n      "description": "what the skill does and how",\n      "teachability": 0.8\n    }\n  ]\n}\n\nIf no skills are worth drafting, return: { "skills": [] }`,
+        content: `Analyze these episode summaries and identify any repeatable workflows, procedures, or techniques that could be extracted as reusable "skills" (templates for future tasks). If no skills are worth drafting, return an empty array.\n\nEpisodes:\n${serialized}`,
       },
     ],
   });
 
-  const text = stripJsonFences(
-    response.content[0].type === "text" ? response.content[0].text : "{}"
-  );
-
-  let skills: Array<{ name: string; description: string; teachability: number }> = [];
-
-  try {
-    const parsed = JSON.parse(stripJsonFences(text));
-    skills = parsed.skills ?? [];
-  } catch {
-    log.error("Step 4: Failed to parse skill drafting response");
-    return 0;
-  }
+  const { skills } = SkillDraftOutputSchema.parse(extractToolInput(response, "draft_skill"));
 
   let drafted = 0;
   for (const s of skills) {
@@ -440,7 +515,7 @@ export async function stepSkillDraft(
         );
         log.info(`embedded skill ${skillId}`);
       } catch (err) {
-        log.error(`embed skill ${skillId} failed`, err);
+        log.error({ err }, `embed skill ${skillId} failed`);
       }
     }
     drafted++;
@@ -547,7 +622,7 @@ export async function runNightlyConsolidation(
     durationMs,
   };
 
-  log.info("Nightly consolidation complete", result);
+  log.info({ result }, "Nightly consolidation complete");
   return result;
 }
 
@@ -567,21 +642,7 @@ export async function runPartialConsolidation(
   const conceptsPromoted = await stepPromote(client, pool, config);
   const conceptsReconciled = await stepReconcile(client, pool, config, runId);
 
-  log.info(`Partial consolidation complete`, { runId, episodesCreated, conceptsPromoted, conceptsReconciled });
+  log.info({ runId, episodesCreated, conceptsPromoted, conceptsReconciled }, "Partial consolidation complete");
   return { runId, episodesCreated, conceptsPromoted, conceptsReconciled };
 }
 
-// ── Helpers ────────────────────────────────────────────────
-
-function stripJsonFences(text: string): string {
-  return text.replace(/^\s*```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "").trim();
-}
-
-function chunkArray<T>(arr: T[], k: number): T[][] {
-  const chunkSize = Math.ceil(arr.length / k);
-  const chunks: T[][] = [];
-  for (let i = 0; i < arr.length; i += chunkSize) {
-    chunks.push(arr.slice(i, i + chunkSize));
-  }
-  return chunks;
-}

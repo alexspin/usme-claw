@@ -1,6 +1,9 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type pg from "pg";
+import { destr } from "destr";
+import { z } from "zod";
 import { ENTITY_EXTRACTION_V1 } from "./prompts/entity-extraction-v1.js";
+import { logger } from "../logger.js";
 import {
   insertEntity,
   insertEntityRelationship,
@@ -42,14 +45,77 @@ export interface EntityExtractorConfig {
   embeddingApiKey?: string;
 }
 
+// ── Zod Schemas ────────────────────────────────────────────
+
+const ExtractedEntitySchema = z.object({
+  name: z.string(),
+  type: z.enum(["person", "org", "project", "tool", "location", "concept"]),
+  canonical: z.string(),
+});
+
+const ExtractedRelationshipSchema = z.object({
+  source: z.string(),
+  target: z.string(),
+  relationship: z.enum([
+    "works_at",
+    "knows",
+    "manages",
+    "is_a",
+    "owns",
+    "uses",
+    "part_of",
+    "related_to",
+  ]),
+});
+
+const EntityExtractionResultSchema = z.object({
+  entities: z.array(ExtractedEntitySchema),
+  relationships: z.array(ExtractedRelationshipSchema),
+});
+
+// ── Tool Schema for Anthropic tool_use ─────────────────────
+
+const EXTRACT_ENTITIES_TOOL: Anthropic.Tool = {
+  name: "extract_entities",
+  description: "Extract named entities and relationships from the conversation turn.",
+  input_schema: {
+    type: "object" as const,
+    properties: {
+      entities: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            name: { type: "string" },
+            type: { type: "string", enum: ["person", "org", "project", "tool", "location", "concept"] },
+            canonical: { type: "string" },
+          },
+          required: ["name", "type", "canonical"],
+        },
+      },
+      relationships: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            source: { type: "string" },
+            target: { type: "string" },
+            relationship: {
+              type: "string",
+              enum: ["works_at", "knows", "manages", "is_a", "owns", "uses", "part_of", "related_to"],
+            },
+          },
+          required: ["source", "target", "relationship"],
+        },
+      },
+    },
+    required: ["entities", "relationships"],
+  },
+};
+
 // ── Logger ─────────────────────────────────────────────────
 
-const log = {
-  info: (msg: string, data?: unknown) =>
-    console.log(`[usme:entity-extract] ${msg}`, data ?? ""),
-  error: (msg: string, err?: unknown) =>
-    console.error(`[usme:entity-extract] ERROR ${msg}`, err ?? ""),
-};
+const log = logger.child({ module: "entity-extractor" });
 
 // ── Core Extraction ────────────────────────────────────────
 
@@ -67,21 +133,24 @@ export async function extractEntities(
   const prompt = buildPrompt(serializedTurn);
 
   const response = await client.messages.create({
-    model: config?.model ?? "claude-haiku-4-20250414",
+    model: config?.model ?? "claude-haiku-4-5",
     max_tokens: config?.maxTokens ?? 2048,
+    tools: [EXTRACT_ENTITIES_TOOL],
+    tool_choice: { type: "tool", name: "extract_entities" },
     messages: [{ role: "user", content: prompt }],
   });
 
-  const text =
-    response.content[0].type === "text" ? response.content[0].text : "";
-
-  const parsed = JSON.parse(text) as EntityExtractionResult;
-
-  if (!Array.isArray(parsed.entities)) {
-    throw new Error("Entity extraction returned invalid structure: missing entities array");
+  const toolBlock = response.content.find((b) => b.type === "tool_use");
+  if (!toolBlock || toolBlock.type !== "tool_use") {
+    throw new Error("Entity extraction: no tool_use block in response");
   }
 
-  return parsed;
+  const parsed = EntityExtractionResultSchema.safeParse(destr(JSON.stringify(toolBlock.input)));
+  if (!parsed.success) {
+    throw new Error(`Entity extraction schema validation failed: ${parsed.error.message}`);
+  }
+
+  return parsed.data;
 }
 
 // ── Deduplication ──────────────────────────────────────────
@@ -142,7 +211,7 @@ export async function persistEntities(
         entityEmbeddings[i] = batchResult[i];
       }
     } catch (err) {
-      log.error(`Failed to batch embed entities`, err);
+      log.error({ err }, "Failed to batch embed entities");
     }
   }
 
@@ -219,7 +288,7 @@ export async function runEntityExtraction(
     const result = await extractEntities(client, serializedTurn, config);
     await persistEntities(pool, result, config);
   } catch (err) {
-    log.error("Entity extraction failed", err);
+    log.error({ err }, "Entity extraction failed");
     // Non-blocking: swallow error, extraction is best-effort
   }
 }

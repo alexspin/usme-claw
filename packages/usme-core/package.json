@@ -16,11 +16,18 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.82.0",
+    "destr": "^2.0.5",
+    "lru-cache": "^11.0.0",
+    "node-cron": "^3.0.0",
     "node-pg-migrate": "^7.0",
     "openai": "^4.0.0",
-    "pg": "^8.12"
+    "pg": "^8.12",
+    "pino": "^9.0.0",
+    "tiktoken": "^1.0.0",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@types/node-cron": "^3.0.0",
     "@types/pg": "^8.11",
     "vitest": "^2.0"
   }

@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { z } from "zod";
 import type pg from "pg";
 import {
   getUnreconciledConcepts,
@@ -13,13 +14,9 @@ import {
 import { embedText } from "../embed/index.js";
 import type { NightlyConfig } from "./nightly.js";
 import type { Concept } from "../schema/types.js";
+import { logger } from "../logger.js";
 
-const log = {
-  info: (msg: string, data?: unknown) =>
-    console.log(`[usme:reconcile] ${msg}`, data ?? ""),
-  error: (msg: string, err?: unknown) =>
-    console.error(`[usme:reconcile] ERROR ${msg}`, err ?? ""),
-};
+const log = logger.child({ module: "reconcile" });
 
 interface ReconcileDecision {
   operation: "noop" | "update" | "supersede" | "merge" | "delete_new";
@@ -30,8 +27,17 @@ interface ReconcileDecision {
   temporal_note?: string;
 }
 
-function stripJsonFences(text: string): string {
-  return text.replace(/^\s*```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "").trim();
+const ReconcileDecisionSchema = z.object({
+  operation: z.enum(["noop", "update", "supersede", "merge", "delete_new"]),
+  target_id: z.string().nullable(),
+  updated_content: z.string().nullable(),
+  reasoning: z.string(),
+  confidence: z.number(),
+  temporal_note: z.string().optional(),
+});
+
+function isUuid(s: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
 }
 
 function buildPrompt(concept: Concept, candidates: Concept[]): string {
@@ -57,17 +63,7 @@ Rules:
 - Prefer updating or superseding over keeping duplicates
 - If the new concept is genuinely different from all candidates, return noop
 - If the new concept directly contradicts or refines an existing one, supersede or update it
-- Only merge when both concepts contain complementary information worth preserving
-
-Return valid JSON only:
-{
-  "operation": "noop" | "update" | "supersede" | "merge" | "delete_new",
-  "target_id": "<existing concept UUID or null>",
-  "updated_content": "<new content string for update or merge, null otherwise>",
-  "reasoning": "<one sentence explanation>",
-  "confidence": <0.0-1.0>,
-  "temporal_note": "<optional: e.g. User switched from X to Y in April 2026>"
-}`;
+- Only merge when both concepts contain complementary information worth preserving`;
 }
 
 export async function stepReconcile(
@@ -95,10 +91,13 @@ export async function stepReconcile(
   let nonNoopCount = 0;
 
   for (const concept of concepts) {
+    const embedding = typeof concept.embedding === "string"
+      ? JSON.parse(concept.embedding)
+      : concept.embedding;
     const candidates = await findReconciliationCandidates(
       pool,
       concept.id,
-      concept.embedding,
+      embedding,
       concept.tags,
     );
 
@@ -115,21 +114,62 @@ export async function stepReconcile(
       continue;
     }
 
-    // Call Sonnet for reconciliation decision
+    // Call Sonnet for reconciliation decision via tool_use
     let decision: ReconcileDecision;
     try {
       const response = await client.messages.create({
         model,
         max_tokens: 1024,
+        tools: [{
+          name: "reconcile_decision",
+          description: "Decide how to reconcile a new memory concept against existing ones.",
+          input_schema: {
+            type: "object" as const,
+            properties: {
+              operation: { type: "string", enum: ["noop", "update", "supersede", "merge", "delete_new"] },
+              target_id: { type: ["string", "null"], description: "Existing concept UUID or null" },
+              updated_content: { type: ["string", "null"], description: "New content for update or merge, null otherwise" },
+              reasoning: { type: "string" },
+              confidence: { type: "number" },
+              temporal_note: { type: "string" },
+            },
+            required: ["operation", "target_id", "updated_content", "reasoning", "confidence"],
+          },
+        }],
+        tool_choice: { type: "tool", name: "reconcile_decision" },
         messages: [{ role: "user", content: buildPrompt(concept, candidates) }],
       });
 
-      const text = stripJsonFences(
-        response.content[0].type === "text" ? response.content[0].text : "{}",
-      );
-      decision = JSON.parse(text) as ReconcileDecision;
+      const toolBlock = response.content.find((b) => b.type === "tool_use");
+      if (!toolBlock || toolBlock.type !== "tool_use") {
+        log.warn({ conceptId: concept.id }, "no tool_use block in reconcile response");
+        await insertAuditEntry(pool, {
+          run_id: runId,
+          operation: "parse_error",
+          concept_type: concept.concept_type,
+          new_concept_id: concept.id,
+          model_used: model,
+        });
+        await markConceptReconciled(pool, concept.id);
+        continue;
+      }
+
+      const parsed = ReconcileDecisionSchema.safeParse(toolBlock.input);
+      if (!parsed.success) {
+        log.error({ error: parsed.error, conceptId: concept.id }, "reconcile schema validation failed");
+        await insertAuditEntry(pool, {
+          run_id: runId,
+          operation: "parse_error",
+          concept_type: concept.concept_type,
+          new_concept_id: concept.id,
+          model_used: model,
+        });
+        await markConceptReconciled(pool, concept.id);
+        continue;
+      }
+      decision = parsed.data;
     } catch (err) {
-      log.error(`Parse error for concept ${concept.id}`, err);
+      log.error({ err }, `Parse error for concept ${concept.id}`);
       await insertAuditEntry(pool, {
         run_id: runId,
         operation: "parse_error",
@@ -183,7 +223,7 @@ export async function stepReconcile(
             const newEmbedding = await embedText(decision.updated_content, config.embeddingApiKey);
             await updateConceptEmbedding(pool, decision.target_id, newEmbedding);
           } catch (err) {
-            log.error(`Failed to re-embed updated concept ${decision.target_id}`, err);
+            log.error({ err }, `Failed to re-embed updated concept ${decision.target_id}`);
           }
         }
         await markConceptReconciled(pool, decision.target_id);
@@ -203,6 +243,11 @@ export async function stepReconcile(
         nonNoopCount++;
 
       } else if (decision.operation === "supersede" && decision.target_id) {
+        if (!isUuid(decision.target_id)) {
+          log.error(`Skipping supersede: target_id is not a valid UUID: "${decision.target_id}"`);
+          await markConceptReconciled(pool, concept.id);
+          continue;
+        }
         const target = candidates.find(c => c.id === decision.target_id);
         await deactivateConcept(pool, decision.target_id, concept.id);
         await insertAuditEntry(pool, {
@@ -221,6 +266,11 @@ export async function stepReconcile(
         nonNoopCount++;
 
       } else if (decision.operation === "merge" && decision.target_id && decision.updated_content) {
+        if (!isUuid(decision.target_id)) {
+          log.error(`Skipping merge: target_id is not a valid UUID: "${decision.target_id}"`);
+          await markConceptReconciled(pool, concept.id);
+          continue;
+        }
         const target = candidates.find(c => c.id === decision.target_id);
         const mergedId = await insertConcept(pool, {
           concept_type: concept.concept_type,
@@ -249,7 +299,7 @@ export async function stepReconcile(
               [JSON.stringify(vec), mergedId],
             );
           } catch (err) {
-            log.error(`embed merged concept ${mergedId} failed`, err);
+            log.error({ err }, `embed merged concept ${mergedId} failed`);
           }
         }
 
@@ -275,7 +325,13 @@ export async function stepReconcile(
         continue;
 
       } else if (decision.operation === "delete_new") {
-        await deactivateConcept(pool, concept.id, decision.target_id ?? concept.id);
+        const supersededBy = decision.target_id && isUuid(decision.target_id)
+          ? decision.target_id
+          : concept.id;
+        if (decision.target_id && !isUuid(decision.target_id)) {
+          log.error(`delete_new: target_id is not a valid UUID: "${decision.target_id}", falling back to self-reference`);
+        }
+        await deactivateConcept(pool, concept.id, supersededBy);
         await insertAuditEntry(pool, {
           run_id: runId,
           operation: "delete_new",
@@ -304,7 +360,7 @@ export async function stepReconcile(
         });
       }
     } catch (err) {
-      log.error(`Failed to execute decision for concept ${concept.id}`, err);
+      log.error({ err }, `Failed to execute decision for concept ${concept.id}`);
     }
 
     await markConceptReconciled(pool, concept.id);

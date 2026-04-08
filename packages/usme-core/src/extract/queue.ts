@@ -15,14 +15,11 @@ export interface QueueStats {
   processing: boolean;
 }
 
+import { logger } from "../logger.js";
+
 // ── Logger ─────────────────────────────────────────────────
 
-const log = {
-  info: (msg: string, data?: unknown) =>
-    console.log(`[usme:queue] ${msg}`, data ?? ""),
-  error: (msg: string, err?: unknown) =>
-    console.error(`[usme:queue] ERROR ${msg}`, err ?? ""),
-};
+const log = logger.child({ module: "queue" });
 
 // ── Queue Implementation ───────────────────────────────────
 
@@ -89,7 +86,7 @@ export class ExtractionQueue {
       this.completed++;
     } catch (err) {
       this.failed++;
-      log.error("Job failed, continuing to next", err);
+      log.error({ err }, "Job failed, continuing to next");
     } finally {
       this.processing = false;
     }

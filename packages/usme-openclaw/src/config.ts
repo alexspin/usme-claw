@@ -72,16 +72,16 @@ export const DEFAULT_CONFIG: UsmePluginConfig = {
   },
   extraction: {
     enabled: true,
-    model: "claude-haiku-4-20250414",
+    model: "claude-haiku-4-5",
     entityExtraction: {
       enabled: true,
-      model: "claude-haiku-4-20250414",
+      model: "claude-haiku-4-5",
     },
   },
   consolidation: {
     cron: "0 3 * * *",
-    sonnetModel: "claude-sonnet",
-    skillDraftingModel: "claude-sonnet",
+    sonnetModel: "claude-sonnet-4-6",
+    skillDraftingModel: "claude-sonnet-4-6",
     reconciliationModel: "claude-sonnet-4-6",
     candidatesPerNight: 5,
   },
@@ -128,6 +128,6 @@ export function resolveConfig(
       },
     },
     shadow: { ...DEFAULT_CONFIG.shadow, ...partial.shadow },
-    embeddingApiKey: partial.embeddingApiKey ?? DEFAULT_CONFIG.embeddingApiKey,
+    embeddingApiKey: process.env.OPENAI_API_KEY || partial.embeddingApiKey || "",
   };
 }
