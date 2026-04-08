@@ -182,6 +182,10 @@ export default function usmePlugin(api: {
         | undefined;
 
       const sessionId = ev.sessionId ?? hookCtx?.sessionId ?? "unknown";
+      const sessionKey = hookCtx?.sessionKey ?? "";
+      if (/^agent:[^:]+:(cron|subagent):/.test(sessionKey)) {
+        return undefined; // skip cron and subagent sessions — noise in memory
+      }
 
       // Normalise messages to { role, content } pairs with plain-text content
       const rawMessages = ev.messages ?? [];
