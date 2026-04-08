@@ -30,11 +30,59 @@ import {
   embedText,
   stripMetadataEnvelope,
   bumpAccessCounts,
+  runFactExtraction,
+  runEntityExtraction,
+  getExtractionQueue,
   logger,
 } from "@usme/core";
-import type { SchedulerHandle } from "@usme/core";
+import type { SchedulerHandle, InjectedMemory } from "@usme/core";
 import { resolveConfig } from "./config.js";
-import { injectedToSystemAddition, extractText } from "./plugin.js";
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
+/** Unwrap Anthropic content block arrays to plain text (recursive). */
+export function extractText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .flatMap((b): string[] => {
+        if (!b || typeof b !== "object") return [];
+        if ((b as any).type === "text" && typeof (b as any).text === "string") return [(b as any).text];
+        if ((b as any).content) return [extractText((b as any).content)];
+        return [];
+      })
+      .join("\n");
+  }
+  return String(content ?? "");
+}
+
+/** Convert InjectedMemory[] items into a system prompt addition. */
+export function injectedToSystemAddition(items: InjectedMemory[]): string {
+  if (items.length === 0) return "";
+  const lines: string[] = [];
+  for (const item of items) {
+    const dateStr = item.createdAt instanceof Date
+      ? item.createdAt.toISOString().slice(0, 10)
+      : String(item.createdAt).slice(0, 10);
+    const relevance = item.score >= 0.75 ? "high" : item.score >= 0.50 ? "med" : "low";
+    let header = `[${item.tier} | ${dateStr} | relevance:${relevance}`;
+    if (item.tags && item.tags.length > 0) {
+      header += ` | tags:${item.tags.join(",")}`;
+    }
+    header += "]";
+    lines.push(header);
+    lines.push(item.content);
+    lines.push("");
+  }
+  if (lines[lines.length - 1] === "") lines.pop();
+  return [
+    "<usme-context>",
+    "Relevant memories retrieved for this turn:",
+    "",
+    ...lines,
+    "</usme-context>",
+  ].join("\n");
+}
 
 export const id = "usme-claw";
 
@@ -89,9 +137,23 @@ function writeInjectionLog(entry: InjectionLogEntry): void {
   }
 }
 
+// ── Debug logger (file-based, zero deps, always writable) ───────────────────
+
+const DBG_LOG = "/tmp/usme/debug.log";
+function dbg(msg: string): void {
+  try {
+    fs.mkdirSync("/tmp/usme", { recursive: true });
+    fs.appendFileSync(DBG_LOG, `[${new Date().toISOString()}] ${msg}\n`);
+  } catch { /* never break the hot path */ }
+}
+
 // ── Scheduler singleton ────────────────────────────────────────────────────────
 
 let _schedulerHandle: SchedulerHandle | null = null;
+
+// NOTE: singleton guard removed. OpenClaw invokes the factory 4-5x per startup
+// with different api instances. Only the dispatched instance fires the hook, so
+// all instances must register independently. Duplicate runs per turn are acceptable.
 
 // ── Plugin entry point ─────────────────────────────────────────────────────────
 
@@ -168,6 +230,9 @@ export default function usmePlugin(api: {
   //
   // The before_prompt_build hook can return { prependContext } to inject text
   // into the prompt. Returning void/undefined leaves the prompt unchanged.
+  dbg(`hook registration: mode=${effectiveMode} isActive=${isActive}`);
+  api.logger.info(`[usme] registering hook (mode=${effectiveMode})`);
+
   api.on(
     "before_prompt_build",
     async (event, ctx) => {
@@ -183,7 +248,10 @@ export default function usmePlugin(api: {
 
       const sessionId = ev.sessionId ?? hookCtx?.sessionId ?? "unknown";
       const sessionKey = hookCtx?.sessionKey ?? "";
+      dbg(`hook fired: sessionId=${sessionId} sessionKey=${sessionKey} msgCount=${(ev.messages ?? []).length}`);
+
       if (/^agent:[^:]+:(cron|subagent):/.test(sessionKey)) {
+        dbg(`early exit: cron/subagent session filter matched`);
         return undefined; // skip cron and subagent sessions — noise in memory
       }
 
@@ -203,13 +271,18 @@ export default function usmePlugin(api: {
         .reverse()
         .find((m) => m.role === "user");
 
+      dbg(`lastUserMsg: ${lastUserMsg ? `"${String(lastUserMsg.content).slice(0, 80)}"` : 'NULL'}`);
       if (!lastUserMsg?.content) {
-        // No user message to embed — nothing to do
+        dbg(`early exit: no user message found`);
         return undefined;
       }
 
       const query = stripMetadataEnvelope(extractText(lastUserMsg.content));
-      if (!query || query.length < 3) return undefined;
+      dbg(`query after strip: length=${query?.length ?? 0} preview="${(query ?? "").slice(0, 60)}"`);
+      if (!query || query.length < 3) {
+        dbg(`early exit: query too short (${query?.length ?? 0} chars)`);
+        return undefined;
+      }
 
       // ── Run full retrieval + assembly pipeline ─────────────────────────────
       const pipelineStart = performance.now();
@@ -221,18 +294,23 @@ export default function usmePlugin(api: {
 
       try {
         const embeddingKey = config.embeddingApiKey || openaiKey;
+        dbg(`embeddingKey: ${embeddingKey ? `set (len=${embeddingKey.length})` : 'MISSING'}`);
         if (!embeddingKey) {
           log.warn("no embedding API key — skipping USME pipeline this turn");
+          dbg(`early exit: no embedding API key`);
           return undefined;
         }
 
+        dbg(`calling embedText query="${query.slice(0, 60)}"`);
         const queryEmbedding = await embedText(query, embeddingKey);
+        dbg(`embedText OK: vector length=${queryEmbedding?.length ?? 'null'}`);
 
         const assemblyMode = config.assembly.defaultMode;
         const tokenBudget = (
           config.assembly.modes as Record<string, { tokenBudget: number }>
         )[assemblyMode].tokenBudget;
 
+        dbg(`calling coreAssemble: mode=${assemblyMode} tokenBudget=${tokenBudget} turnIndex=${agentMessages.filter((m) => m.role === "user").length}`);
         const result = await coreAssemble(
           {
             query,
@@ -249,14 +327,18 @@ export default function usmePlugin(api: {
         itemsConsidered = result.metadata.itemsConsidered;
         tiersQueried = result.metadata.tiersQueried as string[];
         tokensInjected = result.metadata.tokensUsed;
+        dbg(`coreAssemble OK: itemsSelected=${itemsSelected} itemsConsidered=${itemsConsidered} tiers=${tiersQueried.join(",")} tokens=${tokensInjected}`);
 
         if (result.items.length > 0) {
           contextBlock = injectedToSystemAddition(result.items);
-
-          // Fire-and-forget: bump access counts for retrieved items
+          dbg(`contextBlock built: length=${contextBlock.length} chars`);
           void bumpAccessCounts(pool, result.items).catch(() => {/* ignore */});
+        } else {
+          dbg(`result.items is empty — contextBlock will be empty string`);
         }
       } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        dbg(`PIPELINE ERROR: ${errMsg}`);
         log.error({ err }, "USME pipeline failed — skipping injection this turn");
         return undefined;
       }
@@ -277,6 +359,44 @@ export default function usmePlugin(api: {
         contextBlock,
       });
 
+      dbg(`pipeline done: durationMs=${Math.round(performance.now() - pipelineStart)} injected=${isActive && contextBlock.length > 0}`);
+
+      // ── Fire-and-forget extraction (fact + entity) ────────────────────────
+      // Runs after retrieval so it never blocks injection. Uses the same
+      // agentMessages already normalized above.
+      if (config.extraction?.enabled && anthropicKey) {
+        const serializedTurn = agentMessages
+          .filter((m) => m.role === "user" || m.role === "assistant")
+          .map((m) => {
+            const text = stripMetadataEnvelope(extractText(m.content));
+            return text.length >= 10 ? `[${m.role}]: ${text}` : null;
+          })
+          .filter((s): s is string => s !== null)
+          .slice(-4)
+          .join("\n\n");
+
+        if (serializedTurn) {
+          const anthropicClient = new Anthropic({ apiKey: anthropicKey });
+          const queue = getExtractionQueue();
+          queue.enqueue(async () => {
+            await runFactExtraction(
+              anthropicClient, pool,
+              { sessionId, turnIndex: agentMessages.filter((m) => m.role === "user").length, serializedTurn },
+              { model: config.extraction.model, embeddingApiKey: config.embeddingApiKey || openaiKey },
+            );
+          });
+          if (config.extraction.entityExtraction?.enabled) {
+            queue.enqueue(async () => {
+              await runEntityExtraction(
+                anthropicClient, pool,
+                serializedTurn,
+                { model: config.extraction.entityExtraction.model, embeddingApiKey: config.embeddingApiKey || openaiKey },
+              );
+            });
+          }
+        }
+      }
+
       // ── Inject context (active mode only) ────────────────────────────────
       if (isActive && contextBlock.length > 0) {
         // prependContext is injected into the prompt by OpenClaw before the
@@ -290,7 +410,6 @@ export default function usmePlugin(api: {
     },
     { priority: -5 },
   );
-
   // ── Graceful shutdown ──────────────────────────────────────────────────────
   api.registerService?.({
     id: "usme-pool",
@@ -298,6 +417,7 @@ export default function usmePlugin(api: {
     stop: async () => {
       _schedulerHandle?.stop();
       _schedulerHandle = null;
+      await getExtractionQueue().drain();
       await closePool();
     },
   });
