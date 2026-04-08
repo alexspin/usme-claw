@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
+import { destr } from "destr";
 import type pg from "pg";
 import { FACT_EXTRACTION_V1 } from "./prompts/fact-extraction-v1.js";
 import { insertSensoryTrace, findSimilarTrace } from "../db/queries.js";
@@ -107,7 +108,7 @@ export async function extractFacts(
     return { items: [] };
   }
 
-  const parsed = FactExtractionResultSchema.safeParse(toolBlock.input);
+  const parsed = FactExtractionResultSchema.safeParse(destr(toolBlock.input));
   if (!parsed.success) {
     log.error({ error: parsed.error }, "extraction schema validation failed");
     return { items: [] };

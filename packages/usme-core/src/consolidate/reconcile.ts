@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
+import { destr } from "destr";
 import type pg from "pg";
 import {
   getUnreconciledConcepts,
@@ -154,7 +155,7 @@ export async function stepReconcile(
         continue;
       }
 
-      const parsed = ReconcileDecisionSchema.safeParse(toolBlock.input);
+      const parsed = ReconcileDecisionSchema.safeParse(destr(toolBlock.input));
       if (!parsed.success) {
         log.error({ error: parsed.error, conceptId: concept.id }, "reconcile schema validation failed");
         await insertAuditEntry(pool, {

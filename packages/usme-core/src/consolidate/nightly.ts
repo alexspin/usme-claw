@@ -262,7 +262,12 @@ export async function stepPromote(
     ],
   });
 
-  const { concepts } = PromoteOutputSchema.parse(extractToolInput(response, "promote_concepts"));
+  const promoteResult = PromoteOutputSchema.safeParse(extractToolInput(response, "promote_concepts"));
+  if (!promoteResult.success) {
+    log.error({ error: promoteResult.error }, "stepPromote: schema validation failed");
+    return 0;
+  }
+  const { concepts } = promoteResult.data;
 
   let promoted = 0;
   for (const c of concepts) {
@@ -371,7 +376,12 @@ export async function stepContradictions(
     });
 
     try {
-      const decision = ContradictionOutputSchema.parse(extractToolInput(response, "resolve_contradiction"));
+      const contradictionResult = ContradictionOutputSchema.safeParse(extractToolInput(response, "resolve_contradiction"));
+      if (!contradictionResult.success) {
+        log.error({ error: contradictionResult.error }, "stepContradictions: schema validation failed");
+        continue;
+      }
+      const decision = contradictionResult.data;
 
       if (!decision.contradicts) continue;
 
@@ -492,7 +502,12 @@ export async function stepSkillDraft(
     ],
   });
 
-  const { skills } = SkillDraftOutputSchema.parse(extractToolInput(response, "draft_skill"));
+  const skillResult = SkillDraftOutputSchema.safeParse(extractToolInput(response, "draft_skill"));
+  if (!skillResult.success) {
+    log.error({ error: skillResult.error }, "stepSkillDraft: schema validation failed");
+    return 0;
+  }
+  const { skills } = skillResult.data;
 
   let drafted = 0;
   for (const s of skills) {
