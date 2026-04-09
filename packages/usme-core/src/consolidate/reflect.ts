@@ -299,8 +299,24 @@ Review the corpus and provide:
   const arrayFields = ["concept_updates", "new_skills", "contradictions", "entity_updates"] as const;
   for (const field of arrayFields) {
     if (!Array.isArray(rawOutput[field])) {
-      log.warn({ field, got: typeof rawOutput[field], value: rawOutput[field] }, "normalising non-array field to []");
-      rawOutput[field] = [];
+      if (typeof rawOutput[field] === 'string') {
+        try {
+          const parsed = JSON.parse(rawOutput[field] as string);
+          if (Array.isArray(parsed)) {
+            log.info({ field, count: parsed.length }, "normalising JSON string field to array");
+            rawOutput[field] = parsed;
+          } else {
+            log.warn({ field }, "JSON.parse succeeded but result is not an array — coercing to []");
+            rawOutput[field] = [];
+          }
+        } catch {
+          log.warn({ field }, "JSON.parse failed on string field — coercing to []");
+          rawOutput[field] = [];
+        }
+      } else {
+        log.warn({ field, got: typeof rawOutput[field] }, "normalising non-array field to []");
+        rawOutput[field] = [];
+      }
     }
   }
 
