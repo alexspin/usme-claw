@@ -53,7 +53,17 @@ const NewSkillSchema = z.object({
   trigger_pattern: z.string().optional(),
   steps: z.unknown().optional(),
   confidence: z.number().min(0).max(1),
-  source_episode_ids: z.array(z.number()).optional(),
+  source_episode_ids: z.array(
+    z.preprocess(v => {
+      if (typeof v === 'number') return v;
+      if (typeof v === 'string') {
+        // Sonnet may return "episode:42" or "42" — extract first digit sequence
+        const m = v.match(/(\d+)/);
+        return m ? parseInt(m[1], 10) : null;
+      }
+      return null;
+    }, z.number().nullable())
+  ).transform(arr => arr.filter((v): v is number => v !== null)).optional(),
 });
 
 const ContradictionSchema = z.object({
@@ -208,7 +218,7 @@ Review the corpus and provide:
 
   const response = await client.messages.create({
     model,
-    max_tokens: 8192,
+    max_tokens: 16000,
     tools: [{
       name: "reflection_output",
       description: "Structured output from memory corpus reflection",
@@ -283,7 +293,18 @@ Review the corpus and provide:
 
   log.info({ model, inputTokens, outputTokens, durationMs: llmDurationMs }, "reflection llm_call complete");
 
-  const parseResult = ReflectionOutputSchema.safeParse(extractToolInput(response, "reflection_output"));
+  // Normalise LLM output: Sonnet sometimes returns a string (e.g. "None", "N/A")
+  // for array fields when there are no items. Coerce those to empty arrays.
+  const rawOutput = extractToolInput(response, "reflection_output") as Record<string, unknown>;
+  const arrayFields = ["concept_updates", "new_skills", "contradictions", "entity_updates"] as const;
+  for (const field of arrayFields) {
+    if (!Array.isArray(rawOutput[field])) {
+      log.warn({ field, got: typeof rawOutput[field], value: rawOutput[field] }, "normalising non-array field to []");
+      rawOutput[field] = [];
+    }
+  }
+
+  const parseResult = ReflectionOutputSchema.safeParse(rawOutput);
   if (!parseResult.success) {
     throw new Error(`Reflection schema validation failed: ${JSON.stringify(parseResult.error)}`);
   }

@@ -1,37 +1,34 @@
-Use the ruflo MCP swarm to build USME (usme-claw) — a TypeScript monorepo
-implementing a context engine plugin for OpenClaw.
+Use the ruflo MCP swarm to implement the USME memory system improvements defined in the requirements document at:
+
+  /home/alex/ai/projects/rufus-projects/usme-claw/pm/memory-innovation.md
+
+Read that document in full before doing anything else. It is the single source of truth for this work.
 
 Environment notes:
 - Working directory: /home/alex/ai/projects/rufus-projects/usme-claw/
-- Git is already initialized — do NOT run git init
-- Node: v25.8.1 (node:sqlite built-in available)
-- Docker + Docker Compose available
-- OpenClaw SDK at: /home/alex/ai/projects/node_modules/openclaw/
-- PM docs at: /home/alex/ai/projects/rufus-projects/usme/pm/
-  - Read ARCHITECTURE.md, PRD.md, DECISIONS.md before doing anything else
-  - ARCHITECTURE.md is the single source of truth for design decisions
+- Separate dashboard project: /home/alex/ai/projects/rufus-projects/usme-dashboard/ (create this)
+- Repo already has git configured — do NOT run git init
+- node: v25.8.1, npm available
+- PostgreSQL: localhost:5432, database=usme, user=usme, password=usme_dev
+- Anthropic SDK, pino, node-cron, lru-cache, zod, tiktoken, pg are already installed in usme-core
+- OpenClaw extensions dir: /home/alex/ai/projects/.openclaw/extensions/usme-claw/
 
 ---
 
-MANDATORY STARTUP — your very first response must do all three of these things
-at once, in a single message. Do not split them across multiple messages or
-agents will run sequentially instead of in parallel.
+MANDATORY STARTUP — your very first response must do all three of these things at once, in a single message. Do not split them across multiple messages or agents will run one at a time instead of in parallel.
 
-1. Initialize the swarm using the ruflo MCP tool (swarm_init), with hierarchical
-   topology, 8 agents max, and specialized strategy.
+1. Initialize the swarm using the ruflo MCP tool (swarm_init), with hierarchical topology, 8 agents max, and specialized strategy.
 
-2. Create a todo list with all agent tasks in one batch — one TodoWrite call
-   covering every agent.
+2. Create a todo list with all agent tasks in one batch — one TodoWrite call covering every agent.
 
-3. Spawn every agent at the same time using the Task tool, each with
-   run_in_background set to true. All Task calls go in this same first message.
+3. Spawn every agent at the same time using the Task tool, each with run_in_background set to true. All Task calls go in this same first message.
 
 ---
 
 DASHBOARD OBSERVABILITY — mandatory for every agent, no exceptions:
 
 Before starting:
-  memory_store("plan:<agent-name>", "<what I'll do> | <files I'll create> | ~<N> min")
+  memory_store("plan:<agent-name>", "<what I'll do> | <files I'll touch> | ~<N> min")
 
 After completing:
   memory_store("done:<agent-name>", "<one line: what changed>")
@@ -40,210 +37,177 @@ Only if blocked:
   memory_store("blocked:<agent-name>", "<what's blocking me>")
 
 Examples:
-  memory_store("plan:architect", "reading PM docs + resolving open decisions | docs/design.md | ~15 min")
-  memory_store("done:architect", "design.md written with all open decisions resolved")
-  memory_store("plan:coder-storage", "Postgres schema + DDL + Docker Compose | packages/usme-core/db/ | ~20 min")
-
-Log all decisions to swarm memory namespace "usme".
+  memory_store("plan:architect", "reading existing code + designing all new components | docs/design.md | ~20 min")
+  memory_store("done:architect",  "design written to docs/DESIGN.md, reviewed all existing types and migrations")
+  memory_store("plan:coder",      "implementing all fixes from design | multiple files across usme-core and usme-openclaw | ~60 min")
+  memory_store("done:coder",      "all implementations complete, build passes, migrations run")
+  memory_store("blocked:tester",  "waiting for coder — need migrations to be run before tests pass")
 
 ---
 
 REQUIREMENTS
 
-Build the usme-claw monorepo — a TypeScript plugin for OpenClaw that replaces
-the default LCM context engine with a relevance-based memory system.
+The full requirements are in memory-innovation.md. Every agent must read it. This section summarises scope and critical constraints only.
 
-The full spec is in /home/alex/ai/projects/rufus-projects/usme/pm/ARCHITECTURE.md.
-Read it. Every agent must read the relevant sections before touching code.
+SCOPE — what this swarm builds:
+1. Fix 1: importance_score on episodes (new DB column) + Haiku importance call in stepEpisodify + skill gate change in stepSkillDraft + access-count write-back in bumpAccessCounts
+2. Fix 2: Memory Reflection Service — new file(s) in usme-core/src/consolidate/, new CLI command in usme-openclaw, new DB migrations for reflection run log and skill_candidates tables, skill candidate delivery cron
+3. Fix 3: Spreading activation — new second-pass graph walk in or alongside usme-core/src/assemble/retrieve.ts, extending the existing InjectionLogEntry with spreading metrics
+4. Privacy scaffold: exclude_from_reflection column on sensory_trace, episodes, concepts, entities tables (4 new migrations)
+5. Dashboard: brand new standalone project at ~/ai/projects/rufus-projects/usme-dashboard/ with Express server + HTML/JS frontend, 6 panels, 6 API endpoints, reading from the USME PostgreSQL database and /tmp/usme/injection.jsonl
 
-Key locked decisions (do not revisit without flagging):
-- Storage: Postgres 16 + TimescaleDB + pgvector (Docker Compose)
-- Driver: node-postgres (pg) with connection pooling
-- Extraction: async Haiku/Flash per-turn (non-blocking)
-- Nightly consolidation: Sonnet via cron
-- Repo structure: monorepo, two packages — usme-core + usme-openclaw
-- Shadow mode: USME runs alongside LCM (LCM stays active), logs what it would inject.
-  Promotion = one-way flip from shadow to active. LCM never needs to run in shadow.
-- No budget constraint on extraction LLM calls (Haiku/Flash)
-- assemble() return type: resolve D3 from ARCHITECTURE.md section 10 by reading the
-  OpenClaw contextEngine slot interface at:
-  /home/alex/ai/projects/node_modules/openclaw/ (SDK source)
+EXPLICITLY OUT OF SCOPE (do not implement):
+- Local embeddings (Ollama)
+- Local reflection LLM
+- MoE-gated retrieval weights
+- Tiered corpus filtering (corpus threshold check must be logged, but switching to tiered mode is deferred)
+- Modifying shadow_comparisons or any shadow mode code
 
-Open decisions (D1-D27 in ARCHITECTURE.md section 10) are for the architect to resolve
-before coding starts. Swarm markers in the doc flag where decisions are needed.
+NEW FILES vs EXISTING FILES:
+- Default to creating new files. Only edit existing files when the requirements explicitly call for it.
+- Existing files that require edits (and only these):
+  - usme-core/src/consolidate/nightly.ts: add importance scoring in stepEpisodify, change skill gate in stepSkillDraft
+  - usme-core/src/db/queries.ts: add utility write-back in bumpAccessCounts
+  - usme-core/src/assemble/retrieve.ts (or new spread.ts imported here): add spreading activation second pass
+  - usme-openclaw/src/index.ts: extend InjectionLogEntry with spreading fields, add spreading activation call
+  - usme-core/src/schema/types.ts: add importance_score to Episode type, add new types for reflection/skill_candidates
+  - usme-core/db/migrations/: add new migration files (010_ onwards, numbered sequentially)
+  - usme-openclaw/src/index.ts: register CLI command for usme reflect
+  - usme-core/src/consolidate/scheduler.ts: add reflection service to schedule
+
+CRITICAL CONSTRAINTS from existing code — architect must verify all of these before designing:
+- migrations/003_episodes.sql: existing episodes schema. New importance_score column added via migration 010.
+- migrations/005_skills.sql: existing skills table. status field is 'candidate'|'active'|'retired', not a boolean.
+- migrations/006_entities.sql: entity_relationships uses valid_from/valid_until for soft deletes — use this pattern, don't hard delete.
+- src/schema/types.ts: all TypeScript interfaces for existing tables. New code must match or extend these, never contradict them.
+- src/assemble/types.ts: RetrievalCandidate, InjectedMemory, AssembleResult shapes. Spreading activation adds items to the RetrievalCandidate pool before scoring — it does not bypass score() in score.ts.
+- src/assemble/retrieve.ts: the TIER_QUERIES SQL map. Do not modify these queries. Spreading activation is a new function that runs after retrieve() returns.
+- usme-openclaw/src/index.ts: InjectionLogEntry interface and writeInjectionLog(). Spreading fields must be added as optional fields to InjectionLogEntry — not a new log mechanism.
+- usme-openclaw/src/index.ts: injection log path is /tmp/usme/injection.jsonl (configurable via USME_INJECTION_LOG env var). Dashboard reads from this path.
+- nightly.ts: all LLM calls use tool_use + Zod safeParse. The new Haiku importance call must follow the same pattern already established in stepPromote/stepContradictions/stepSkillDraft.
+- The Anthropic model alias for Sonnet is claude-sonnet-4-5 (matches existing usage in nightly.ts). Haiku is claude-haiku-4-5.
+
+BUILD RULES — all agents must follow:
+- All new TypeScript goes in usme-core/src/ (business logic) or usme-openclaw/src/ (plugin wiring)
+- Never create dist/ inside source repo packages
+- Build command: npm run build from packages/usme-openclaw/ — outputs single bundle to ~/.openclaw/extensions/usme-claw/dist/plugin.js
+- After any usme-claw code change, run npm run build and verify the extensions dir plugin.js timestamp updated
+- New DB migrations: usme-core/db/migrations/, numbered sequentially from 010_
+- Run migrations: npm run migrate from packages/usme-core/
+- Dashboard is usme-dashboard/ — completely separate project, own package.json, own server
 
 ---
 
 AGENT INSTRUCTIONS
 
+Log all decisions and findings to swarm memory namespace "usme-innovation".
+
 coordinator:
   Run: npx claude-flow@v3alpha hooks session-start
-  memory_store("plan:coordinator", "gating agent sequencing via memory polling | none | ongoing")
-
-  Your job: gate later agents on earlier agents' "done:" keys.
-  Poll for "done:architect" before releasing storage, hotpath, asyncpath, and adapter coders.
-  Poll for "done:coder-storage" before releasing coder-hotpath.
-  Poll for all "done:coder-*" keys before releasing tester.
-
-  Report final status when tester completes.
-  memory_store("done:coordinator", "all agents complete — build finished")
+  Read memory-innovation.md in full.
+  Gate agents in this order:
+    1. Architect runs first — no other agent starts until done:architect is set
+    2. Coder starts after done:architect — poll until set
+    3. QA and Tester both start after done:coder — they may run in parallel with each other
+  If any agent posts blocked:<name>, surface the blocker immediately in swarm memory and notify the other agents.
+  After all agents complete: run npm run build from packages/usme-openclaw/ and confirm success. Then run npm run migrate from packages/usme-core/. Then git add -A && git commit -m "feat: usme memory innovation — reflection service, spreading activation, importance scoring, dashboard"
 
 architect:
-  memory_store("plan:architect", "reading PM docs + resolving D1-D27 open decisions + writing implementation spec | docs/design.md | ~15 min")
+  Poll memory for coordinator confirmation before starting.
+  Read these files thoroughly before designing anything:
+    - packages/usme-core/src/schema/types.ts (all existing types)
+    - packages/usme-core/db/migrations/ (all 9 migration files)
+    - packages/usme-core/src/assemble/types.ts
+    - packages/usme-core/src/assemble/retrieve.ts
+    - packages/usme-core/src/consolidate/nightly.ts
+    - packages/usme-core/src/db/queries.ts
+    - packages/usme-openclaw/src/index.ts
+    - packages/usme-core/src/consolidate/scheduler.ts
 
-  Steps:
-  1. Read ALL of /home/alex/ai/projects/rufus-projects/usme/pm/ARCHITECTURE.md
-  2. Read /home/alex/ai/projects/node_modules/openclaw/docs/ — find the contextEngine
-     slot interface. Identify the exact method signatures and return types USME must implement.
-  3. Resolve every Swarm-flagged decision in the architecture doc. Write your reasoning.
-  4. Write /home/alex/ai/projects/rufus-projects/usme-claw/docs/design.md with:
-     - Resolved open decisions (D1-D27) with brief rationale
-     - Final assemble() return type (critical: must match OpenClaw's contextEngine interface)
-     - Monorepo structure (exact directory tree)
-     - Package names, TypeScript config, build tooling choice
-     - Database schema (final DDL for all tables, including shadow_comparisons)
-     - Selection formula implementation sketch (types + scoring function signature)
-     - Extraction prompt structure (TypeScript types for extracted items)
-     - Shadow mode harness design (how it plugs into the adapter)
-     - Test setup (runner choice, docker-compose.test.yml outline)
-  5. memory_store("done:architect", "design.md complete — all decisions resolved")
+  Design and document in a new file docs/DESIGN.md:
+    - Exact new DB columns and tables needed (names, types, constraints), consistent with existing migration patterns
+    - Exact new TypeScript types/interfaces to add to schema/types.ts
+    - The memory-review service: file location, exported functions, how it integrates with scheduler.ts
+    - The spreading activation function: signature, where it's called in the assemble pipeline, how it extends InjectionLogEntry
+    - The CLI structure for `openclaw usme reflect` in usme-openclaw
+    - The skill candidate delivery cron: how it queries skill_candidates and sends an agent message via the OpenClaw API
+    - The usme-dashboard project structure: Express server layout, how it reads from injection.jsonl and PostgreSQL
+    - Any edge cases or risks (e.g. importance_score column not yet existing when dashboard first loads)
 
-coder-storage:
-  Wait for "done:architect" via memory polling before starting.
-  memory_store("plan:coder-storage", "Postgres schema + migrations + Docker Compose | packages/usme-core/db/ | ~20 min")
+  memory_store("done:architect", "design complete in docs/DESIGN.md")
 
-  Read docs/design.md (written by architect) before touching anything.
+coder:
+  Poll memory for done:architect before starting. Read docs/DESIGN.md in full.
+  Read memory-innovation.md in full.
 
-  Implement:
-  - docker-compose.yml (Postgres 16 + TimescaleDB + pgvector)
-  - docker-compose.test.yml (ephemeral DB for tests — wipe on exit)
-  - packages/usme-core/db/migrations/ — all DDL as numbered migration files
-    Tables: sensory_trace (hypertable), episodes, concepts, skills,
-            entities, entity_relationships, shadow_comparisons
-  - packages/usme-core/src/db/ — connection pool setup, query helpers
-  - scripts/db-init.sh — runs migrations + seeds dev data
-  - TypeScript types for all DB rows
+  Implement everything — no stubs, no TODOs left behind. The system must be fully functional at the end of your work.
 
-  Use node-pg-migrate for migrations (unless architect chose differently).
+  usme-core changes (new files preferred, existing files only where listed in requirements):
+    - New migration files 010_ through 01N_ for: importance_score on episodes, reflection run log table, skill_candidates table, exclude_from_reflection on all 4 tiers
+    - Update Episode type in schema/types.ts to include importance_score
+    - Add new types for reflection run log and skill_candidates
+    - Edit nightly.ts stepEpisodify: add Haiku tool_use call to assign importance_score before DB insert
+    - Edit nightly.ts stepSkillDraft: change WHERE clause to use importance_score >= 7
+    - Edit queries.ts bumpAccessCounts: add utility write-back for high-access-count episodes
+    - New file(s) for the Memory Reflection Service in src/consolidate/
+    - Edit scheduler.ts: add reflection service to the cron schedule (08:00 + 20:00 Pacific)
 
-  memory_store("done:coder-storage", "schema + migrations + Docker Compose complete")
+  usme-openclaw changes:
+    - Edit index.ts: extend InjectionLogEntry with optional spreading fields
+    - Edit index.ts: add spreading activation call after retrieve(), before score()
+    - New spreading activation function (new file src/spread.ts or in retrieve.ts — match the design)
+    - Edit index.ts or new CLI file: register `openclaw usme reflect` command with --model, --dry-run, --verbose, --tier, --status, --last flags
+    - New skill candidate delivery cron job
 
-coder-hotpath:
-  Wait for "done:architect" AND "done:coder-storage" via memory polling.
-  memory_store("plan:coder-hotpath", "assemble() hot path — retrieve, score, critic, pack | packages/usme-core/src/assemble/ | ~25 min")
+  usme-dashboard (new standalone project):
+    - Create ~/ai/projects/rufus-projects/usme-dashboard/ with its own package.json
+    - Express server connecting to same PostgreSQL (same credentials as usme-core)
+    - Reads /tmp/usme/injection.jsonl for Panel 2
+    - All 6 API endpoints fully implemented with real DB queries
+    - HTML/JS frontend with all 6 panels, auto-refresh cadences as specified
+    - Graceful handling of columns that may not exist yet (importance_score, spreading fields)
 
-  Read docs/design.md before touching anything.
+  After implementation: run npm run build from packages/usme-openclaw/ and confirm it succeeds.
+  memory_store("done:coder", "all implementations complete, build passes")
 
-  Implement packages/usme-core/src/assemble/:
-  - retrieve.ts — ANN vector search across memory tiers (pgvector HNSW)
-  - score.ts — weighted formula: semantic similarity + recency decay + provenance + access_frequency
-  - critic.ts — critic gate: filter discard/low-confidence/injection-risk items
-  - pack.ts — greedy token-budget packing, respects mode (tight/extended/ephemeral)
-  - modes.ts — psycho-genius / brilliant / smart-efficient parameter sets
-  - index.ts — assemble(query, budget, mode) returning AssembleResult
+qa:
+  Poll memory for done:coder before starting. Read memory-innovation.md in full. Read docs/DESIGN.md.
+  Your job is to validate that the implementation matches the requirements — not just that it runs.
 
-  The hot path must never write to the DB. It is read-only at runtime.
-  P95 latency target: 150ms max. Keep the implementation lean.
+  Validate against memory-innovation.md panel by panel and fix by fix:
+    - Fix 1: importance_score column exists in migration? Episode type updated? stepEpisodify has Haiku call with tool_use + safeParse? stepSkillDraft gates on importance_score >= 7? bumpAccessCounts has write-back?
+    - Fix 2: Reflection service file exists? Runs without error? CLI flags work (--dry-run, --model, --status)? Reflection run table gets written? skill_candidates table exists and routes correctly above/below 0.7?
+    - Fix 3: Spreading activation runs after retrieve()? InjectionLogEntry has new fields? depth=0 is a no-op?
+    - Exclude flags: migration adds column to all 4 tables? Corpus assembly filters excluded rows?
+    - Dashboard: all 6 panels render with real data? Injection feed auto-refreshes? Reflection history expands correctly? Skills panel shows approval rate?
 
-  memory_store("done:coder-hotpath", "assemble() hot path complete")
-
-coder-asyncpath:
-  Wait for "done:architect" AND "done:coder-storage" via memory polling.
-  memory_store("plan:coder-asyncpath", "extraction pipeline + nightly consolidation | packages/usme-core/src/extract/ + consolidate/ | ~25 min")
-
-  Read docs/design.md before touching anything.
-
-  Implement:
-  packages/usme-core/src/extract/:
-  - extractor.ts — Haiku/Flash API call, async, non-blocking. Structured output:
-    {type: fact|preference|decision|question|plan|anomaly|ephemeral,
-     content: string, provenance: string, utility_estimate: high|medium|low|discard, tags: string[]}
-  - prompts/ — versioned extraction prompt files (user-turn + assistant-turn variants)
-  - queue.ts — in-process queue for post-turn extraction jobs
-  - entity-extractor.ts — named entity + relationship extraction (runs alongside fact extraction)
-
-  packages/usme-core/src/consolidate/:
-  - nightly.ts — 5-step nightly job (see ARCHITECTURE.md section 5):
-    1. cluster sensory_trace into episode summaries (Sonnet)
-    2. promote recurring patterns into concepts (Sonnet)
-    3. contradiction resolution + entity updates (Sonnet)
-    4. skill candidate drafting (Sonnet/Opus)
-    5. decay utility scores + prune expired traces
-  - scheduler.ts — cron setup for nightly job
-
-  memory_store("done:coder-asyncpath", "extraction pipeline + nightly job complete")
-
-coder-adapter:
-  Wait for "done:architect" AND "done:coder-hotpath" via memory polling.
-  memory_store("plan:coder-adapter", "OpenClaw plugin adapter + shadow mode harness + CLI tooling | packages/usme-openclaw/src/ | ~25 min")
-
-  Read docs/design.md before touching anything.
-  Read /home/alex/ai/projects/node_modules/openclaw/ SDK source — understand
-  the contextEngine plugin slot interface exactly.
-
-  Implement packages/usme-openclaw/src/:
-  - plugin.ts — contextEngine slot implementation. Must implement exactly:
-    bootstrap(), ingest(), ingestBatch(), afterTurn(), assemble(), compact(),
-    prepareSubagentSpawn(), onSubagentEnded(), dispose()
-    Set ownsCompaction: true in plugin info.
-  - config.ts — OpenClaw config schema for usme-claw plugin:
-    mode: shadow | active | disabled
-    db: host/port/database/user/password/pool
-    extraction: model (haiku|flash), enabled
-    consolidation: cron, sonnetModel, skillDraftingModel, candidatesPerNight
-    assembly: defaultMode, modes (psycho-genius/brilliant/smart-efficient)
-    shadow: logComparison, samplingRate
-  - shadow.ts — shadow mode harness:
-    On each turn (shadow mode): run USME assemble() concurrently with LCM,
-    write shadow_comparisons row, discard USME output (LCM serves the turn)
-    Graceful degradation: if assemble() throws, log error + return LCM output
-
-  scripts/ (CLI tooling — hard v1 requirement):
-  - shadow-report.ts — per-session and global shadow comparison report
-  - shadow-tail.ts — live tail of shadow_comparisons table
-  - shadow-ready.ts — promotion readiness check (runs all criteria, pass/fail with evidence)
-  - shadow-analyze.ts — run relevance analysis on completed turns
-
-  memory_store("done:coder-adapter", "OpenClaw adapter + shadow harness + CLI scripts complete")
+  For any gap found: fix it directly or document it clearly in swarm memory under concerns:qa.
+  memory_store("done:qa", "<summary of what was validated and any gaps found/fixed>")
 
 tester:
-  Wait for "done:coder-hotpath", "done:coder-asyncpath", "done:coder-adapter"
-  via memory polling before starting.
-  memory_store("plan:tester", "vitest unit + integration tests + shadow tests | packages/*/tests/ | ~20 min")
+  Poll memory for done:coder before starting (may run in parallel with QA).
+  Read memory-innovation.md and docs/DESIGN.md.
 
-  Read docs/design.md and existing source before writing tests.
+  Write automated tests for the new code. Place in existing test directories or alongside new files:
+    - Test that stepEpisodify writes importance_score to DB
+    - Test that stepSkillDraft selects only episodes with importance_score >= 7
+    - Test that spreading activation with maxDepth=0 returns identical results to ANN-only
+    - Test that spreading activation with maxDepth=2 adds connected episodes
+    - Test each dashboard API endpoint returns the correct shape
+    - Test that the reflection CLI --dry-run makes no DB writes
+    - Test that skill_candidates routes correctly above and below 0.7 confidence
 
-  Unit tests (packages/usme-core/tests/unit/):
-  - selection-formula.test.ts — packing algo: given scored items + budget, verify correct selection
-  - recency-decay.test.ts — decay at t=0, t=half_life, t=3*half_life
-  - entity-dedup.test.ts — merge: exact match vs near-miss vs false positive
-  - critic-gate.test.ts — exclusion of discard/low-confidence/soft-deleted items
-
-  Integration tests (packages/usme-core/tests/integration/):
-  - assemble-roundtrip.test.ts — insert test data, call assemble(), verify AssembleResult shape
-  - extraction-pipeline.test.ts — simulate a turn, verify sensory_trace rows written
-  - entity-dedup-live.test.ts — insert entity, re-extract same entity, verify no duplicate
-
-  Shadow mode tests (packages/usme-openclaw/tests/):
-  - shadow-comparison.test.ts — verify shadow_comparisons row written per turn
-  - graceful-degradation.test.ts — if assemble() throws, verify adapter returns LCM output
-
-  Setup:
-  - Use vitest (ESM-native, fast — unless architect chose jest with good reason)
-  - docker-compose.test.yml for DB (wipe on test complete)
-  - vitest.config.ts in each package
-
-  Run the tests. Fix anything that fails.
-
-  memory_store("done:tester", "all tests pass — test count: N unit, M integration, K shadow")
+  Run existing tests to confirm nothing is broken: npm run test from packages/usme-core/ and packages/usme-openclaw/
+  memory_store("done:tester", "<summary of tests written and test results>")
 
 ---
 
 After all agents complete:
-1. npm install (workspace root)
-2. Run tests: npm test
-3. Verify docker-compose.yml starts cleanly: docker compose up -d && sleep 5 && docker compose ps
-4. git add -A && git commit -m "feat: usme-claw v0.1.0 — initial build"
+1. npm run build from packages/usme-openclaw/ — confirm success
+2. npm run migrate from packages/usme-core/ — confirm all migrations applied
+3. npm run test from packages/usme-core/ and packages/usme-openclaw/ — confirm all pass
+4. Start usme-dashboard and confirm it loads at localhost with real data
+5. git add -A && git commit -m "feat: usme memory innovation — reflection service, spreading activation, importance scoring, dashboard"
 
-Do not touch .openclaw/, or the openclaw workspace root.
-Do NOT run git init — already configured.
+Do not touch .openclaw/ workspace files, MEMORY.md, SOUL.md, AGENTS.md, or TOOLS.md.
+Do NOT run git init — repo already configured.
