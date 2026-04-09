@@ -21,10 +21,28 @@ import { criticFilter } from "./critic.js";
 import { pack } from "./pack.js";
 import { resolveMode } from "./modes.js";
 
+export interface SpreadingActivationPass {
+  run: (
+    candidates: import('./types.js').RetrievalCandidate[],
+    pool: Pool,
+  ) => Promise<{
+    candidates: import('./types.js').RetrievalCandidate[];
+    metrics: {
+      initialCount: number;
+      entitiesMatched: number;
+      connectedEntities: number;
+      episodesAdded: number;
+      spreadDepth: number;
+      durationMs: number;
+    };
+  }>;
+}
+
 export interface AssembleOptions {
   pool: Pool;
   queryEmbedding: number[];
   modeOverrides?: Partial<AssemblyModeProfile>;
+  spreadingPass?: SpreadingActivationPass;
 }
 
 /**
@@ -43,12 +61,27 @@ export async function assemble(
   const memoryBudget = Math.floor(request.tokenBudget * profile.tokenBudgetFraction);
 
   // 1. Retrieve: parallel ANN across enabled tiers
-  const candidates = await retrieve({
+  let candidates = await retrieve({
     pool: options.pool,
     queryEmbedding: options.queryEmbedding,
     tiers: profile.tiersEnabled,
     topK: profile.candidatesPerTier,
   });
+
+  // 1b. Spreading activation (optional second pass via entity graph)
+  let spreadingMetrics: {
+    initialCount: number;
+    entitiesMatched: number;
+    connectedEntities: number;
+    episodesAdded: number;
+    spreadDepth: number;
+    durationMs: number;
+  } | undefined;
+  if (options.spreadingPass) {
+    const spreadResult = await options.spreadingPass.run(candidates, options.pool);
+    candidates = spreadResult.candidates;
+    spreadingMetrics = spreadResult.metrics;
+  }
 
   // 2. Score: weighted formula per candidate
   const scored = scoreCandidates(candidates, options.queryEmbedding);
@@ -68,7 +101,7 @@ export async function assemble(
 
   const tiersQueried = [...new Set(candidates.map((c) => c.tier))] as MemoryTier[];
 
-  const metadata: AssembleMetadata = {
+  const metadata: AssembleMetadata & { spreadingMetrics?: typeof spreadingMetrics } = {
     itemsConsidered: candidates.length,
     itemsSelected: selected.length,
     tiersQueried,
@@ -76,6 +109,7 @@ export async function assemble(
     mode: request.mode,
     tokenBudget: memoryBudget,
     tokensUsed: selected.reduce((sum, item) => sum + item.tokenCount, 0),
+    spreadingMetrics,
   };
 
   return { items: selected, metadata };

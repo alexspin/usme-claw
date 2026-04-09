@@ -37,6 +37,8 @@ import {
 } from "@usme/core";
 import type { SchedulerHandle, InjectedMemory } from "@usme/core";
 import { resolveConfig } from "./config.js";
+import { spreadingActivation } from "./spread.js";
+import { reflectCommand } from "./commands/reflect.js";
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -122,6 +124,12 @@ interface InjectionLogEntry {
   injected: boolean;
   /** Full text of the assembled context block (empty string when no items) */
   contextBlock: string;
+  /** Spreading activation depth used (undefined when disabled) */
+  spreadingDepth?: number;
+  /** Number of entities matched during spreading activation */
+  entitiesMatched?: number;
+  /** Number of episodes added by spreading activation */
+  episodesAdded?: number;
 }
 
 /**
@@ -291,6 +299,7 @@ export default function usmePlugin(api: {
       let itemsConsidered = 0;
       let tiersQueried: string[] = [];
       let tokensInjected = 0;
+      let _spreadingMetrics: { entitiesMatched: number; episodesAdded: number; spreadDepth: number } | undefined;
 
       try {
         const embeddingKey = config.embeddingApiKey || openaiKey;
@@ -311,6 +320,13 @@ export default function usmePlugin(api: {
         )[assemblyMode].tokenBudget;
 
         dbg(`calling coreAssemble: mode=${assemblyMode} tokenBudget=${tokenBudget} turnIndex=${agentMessages.filter((m) => m.role === "user").length}`);
+
+        const spreadingDepth = config.spreading?.maxDepth ?? 2;
+        const spreadingPass = spreadingDepth > 0 ? {
+          run: (candidates: import("@usme/core").RetrievalCandidate[], p: import("pg").Pool) =>
+            spreadingActivation(candidates, p, { maxDepth: spreadingDepth, maxAdditional: 10 }),
+        } : undefined;
+
         const result = await coreAssemble(
           {
             query,
@@ -320,14 +336,15 @@ export default function usmePlugin(api: {
             tokenBudget,
             turnIndex: agentMessages.filter((m) => m.role === "user").length,
           },
-          { pool, queryEmbedding },
+          { pool, queryEmbedding, spreadingPass },
         );
 
         itemsSelected = result.metadata.itemsSelected;
         itemsConsidered = result.metadata.itemsConsidered;
         tiersQueried = result.metadata.tiersQueried as string[];
         tokensInjected = result.metadata.tokensUsed;
-        dbg(`coreAssemble OK: itemsSelected=${itemsSelected} itemsConsidered=${itemsConsidered} tiers=${tiersQueried.join(",")} tokens=${tokensInjected}`);
+        _spreadingMetrics = (result.metadata as { spreadingMetrics?: { entitiesMatched: number; episodesAdded: number; spreadDepth: number } }).spreadingMetrics;
+        dbg(`coreAssemble OK: itemsSelected=${itemsSelected} itemsConsidered=${itemsConsidered} tiers=${tiersQueried.join(",")} tokens=${tokensInjected} spreading.episodesAdded=${_spreadingMetrics?.episodesAdded ?? 0}`);
 
         if (result.items.length > 0) {
           contextBlock = injectedToSystemAddition(result.items);
@@ -357,6 +374,9 @@ export default function usmePlugin(api: {
         durationMs: Math.round(durationMs),
         injected: isActive && contextBlock.length > 0,
         contextBlock,
+        spreadingDepth: _spreadingMetrics?.spreadDepth,
+        entitiesMatched: _spreadingMetrics?.entitiesMatched,
+        episodesAdded: _spreadingMetrics?.episodesAdded,
       });
 
       dbg(`pipeline done: durationMs=${Math.round(performance.now() - pipelineStart)} injected=${isActive && contextBlock.length > 0}`);
@@ -425,6 +445,16 @@ export default function usmePlugin(api: {
     },
     { priority: -5 },
   );
+  // ── CLI command registration ──────────────────────────────────────────────
+  api.on("command:usme:reflect", async (event) => {
+    const args = (event.args as string[]) ?? [];
+    try {
+      await reflectCommand(args);
+    } catch (err) {
+      log.error({ err }, "reflect command failed");
+    }
+  });
+
   // ── Graceful shutdown ──────────────────────────────────────────────────────
   api.registerService?.({
     id: "usme-pool",

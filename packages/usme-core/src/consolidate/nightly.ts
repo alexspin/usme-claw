@@ -60,6 +60,10 @@ const log = logger.child({ module: "nightly" });
 
 // ── Schemas ────────────────────────────────────────────────
 
+const ImportanceSchema = z.object({
+  importance_score: z.number().min(1).max(10),
+});
+
 const ConceptSchema = z.object({
   concept_type: z.enum(["fact", "preference", "decision", "relationship_summary"]),
   content: z.string().max(500),
@@ -164,6 +168,48 @@ export async function stepEpisodify(
 
       const timeBucket = chunk[0].created_at;
 
+      // Assign importance_score via Haiku tool_use call
+      let importance_score = 5;
+      try {
+        const importanceStart = Date.now();
+        const importanceResponse = await client.messages.create({
+          model: "claude-haiku-4-5",
+          max_tokens: 256,
+          tools: [{
+            name: "assign_importance",
+            description: "Assign an importance score to a memory episode",
+            input_schema: {
+              type: "object" as const,
+              properties: {
+                importance_score: {
+                  type: "number",
+                  description: "Score 1-10: 1=trivial, 10=critical. Consider specificity, actionability, uniqueness, future relevance.",
+                },
+              },
+              required: ["importance_score"],
+            },
+          }],
+          tool_choice: { type: "tool", name: "assign_importance" },
+          messages: [
+            {
+              role: "user",
+              content: `Assign an importance score (1-10) to this memory episode:\n\n${summary}`,
+            },
+          ],
+        });
+        const importanceResult = ImportanceSchema.safeParse(extractToolInput(importanceResponse, "assign_importance"));
+        if (importanceResult.success) {
+          importance_score = Math.round(importanceResult.data.importance_score);
+        } else {
+          log.error({ error: importanceResult.error }, "stepEpisodify: importance schema validation failed");
+        }
+        const duration = Date.now() - importanceStart;
+        log.info({ importance_score, duration }, "episode importance scored");
+      } catch (err) {
+        log.error({ err }, "stepEpisodify: Haiku importance call failed, defaulting to 5");
+        importance_score = 5;
+      }
+
       const episodeId = await insertEpisode(pool, {
         session_ids: [sessionId],
         time_bucket: timeBucket,
@@ -172,6 +218,7 @@ export async function stepEpisodify(
         source_trace_ids: chunk.map((t) => t.id),
         token_count: countTokens(summary),
         utility_score: 0.5,
+        importance_score,
         metadata: { clustered_at: new Date().toISOString() },
       });
 
@@ -453,7 +500,7 @@ export async function stepSkillDraft(
   const { rows: episodes } = await pool.query(
     `SELECT id, summary, session_ids
      FROM episodes
-     WHERE utility_score >= 0.6
+     WHERE importance_score >= 7
        AND metadata->>'skill_checked_at' IS NULL
      ORDER BY created_at DESC
      LIMIT 30`,

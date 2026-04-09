@@ -15,6 +15,7 @@ export interface SensoryTrace {
   episodified_at: Date | null;
   created_at: Date;
   expires_at: Date | null;
+  exclude_from_reflection?: boolean;
 }
 
 export interface Episode {
@@ -30,6 +31,8 @@ export interface Episode {
   last_accessed: Date | null;
   metadata: Record<string, unknown>;
   created_at: Date;
+  importance_score: number;
+  exclude_from_reflection?: boolean;
 }
 
 export interface Concept {
@@ -50,6 +53,7 @@ export interface Concept {
   metadata: Record<string, unknown>;
   created_at: Date;
   updated_at: Date;
+  exclude_from_reflection?: boolean;
 }
 
 export interface Skill {
@@ -78,6 +82,7 @@ export interface Entity {
   metadata: Record<string, unknown>;
   created_at: Date;
   updated_at: Date;
+  exclude_from_reflection?: boolean;
 }
 
 export interface EntityRelationship {
@@ -91,6 +96,42 @@ export interface EntityRelationship {
   valid_until: Date | null;
   metadata: Record<string, unknown>;
   created_at: Date;
+}
+
+export interface ReflectionRun {
+  id: number;
+  triggered_at: Date;
+  trigger_source: string;
+  model: string;
+  input_tokens?: number;
+  output_tokens?: number;
+  duration_ms?: number;
+  concepts_updated: number;
+  skills_created: number;
+  contradictions_resolved: number;
+  entities_updated: number;
+  episodes_promoted: number;
+  overall_assessment?: string;
+  status: string;
+  rolled_back: boolean;
+  created_at: Date;
+}
+
+export interface SkillCandidate {
+  id: number;
+  name: string;
+  description?: string;
+  trigger_pattern?: string;
+  steps?: unknown;
+  source_episode_ids?: number[];
+  confidence: number;
+  reflection_run_id?: number;
+  approval_status: 'pending' | 'accepted' | 'rejected';
+  accepted?: boolean;
+  accepted_at?: Date;
+  rejected_at?: Date;
+  created_at: Date;
+  updated_at: Date;
 }
 
 export interface ShadowComparison {

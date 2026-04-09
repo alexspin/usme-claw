@@ -53,6 +53,10 @@ export interface AssemblyConfig {
   };
 }
 
+export interface SpreadingConfig {
+  maxDepth: number;
+}
+
 export interface UsmePluginConfig {
   mode: PluginMode;
   db: DbConfig;
@@ -60,6 +64,7 @@ export interface UsmePluginConfig {
   consolidation: ConsolidationConfig;
   assembly: AssemblyConfig;
   embeddingApiKey: string;
+  spreading: SpreadingConfig;
 }
 
 export const DEFAULT_CONFIG: UsmePluginConfig = {
@@ -97,6 +102,9 @@ export const DEFAULT_CONFIG: UsmePluginConfig = {
     },
   },
   embeddingApiKey: process.env.OPENAI_API_KEY ?? "",
+  spreading: {
+    maxDepth: 2,
+  },
 };
 
 export function resolveConfig(
@@ -127,5 +135,8 @@ export function resolveConfig(
       },
     },
     embeddingApiKey: process.env.OPENAI_API_KEY || partial.embeddingApiKey || "",
+    spreading: {
+      maxDepth: partial.spreading?.maxDepth ?? DEFAULT_CONFIG.spreading.maxDepth,
+    },
   };
 }

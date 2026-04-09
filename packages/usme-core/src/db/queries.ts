@@ -75,13 +75,13 @@ export async function insertEpisode(
   const { rows } = await pool.query(
     `INSERT INTO episodes
        (session_ids, time_bucket, summary, embedding, source_trace_ids,
-        token_count, utility_score, metadata)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        token_count, utility_score, importance_score, metadata)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
      RETURNING id`,
     [
       episode.session_ids, episode.time_bucket, episode.summary,
       vecLiteral(episode.embedding), episode.source_trace_ids, episode.token_count,
-      episode.utility_score, episode.metadata,
+      episode.utility_score, episode.importance_score ?? 5, episode.metadata,
     ],
   );
   return rows[0].id;
@@ -229,6 +229,14 @@ export async function bumpAccessCounts(
   if (episodeIds.length > 0) {
     ops.push(pool.query(
       `UPDATE episodes SET access_count = access_count + 1, last_accessed = NOW() WHERE id = ANY($1::uuid[])`,
+      [episodeIds],
+    ));
+    ops.push(pool.query(
+      `UPDATE episodes
+       SET utility_score = LEAST(1.0, utility_score + 0.05)
+       WHERE access_count >= 10
+         AND id = ANY($1::uuid[])
+         AND utility_score < 1.0`,
       [episodeIds],
     ));
   }

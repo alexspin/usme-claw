@@ -8,6 +8,7 @@ import cron from "node-cron";
 import type pg from "pg";
 import { runNightlyConsolidation, stepEpisodify } from "./nightly.js";
 import type { NightlyConfig, NightlyResult } from "./nightly.js";
+import { runReflection } from "./reflect.js";
 import { logger } from "../logger.js";
 
 // ── Types ──────────────────────────────────────────────────
@@ -80,6 +81,35 @@ export function startScheduler(
   job.start();
   log.info({ expr: cronExpr }, "nightly consolidation scheduler started");
 
+  // Memory Reflection Service — 08:00 and 20:00 Pacific
+  const reflectionMorningJob = cron.schedule('0 16 * * *', async () => {
+    log.info('Starting scheduled reflection (08:00 Pacific)');
+    try {
+      await runReflection({ triggerSource: 'scheduler-morning', model: 'claude-sonnet-4-5' });
+    } catch (err) {
+      log.error({ err }, 'scheduled reflection (morning) failed');
+    }
+  }, { timezone: 'UTC', scheduled: true });
+
+  const reflectionEveningJob = cron.schedule('0 4 * * *', async () => {
+    log.info('Starting scheduled reflection (20:00 Pacific)');
+    try {
+      await runReflection({ triggerSource: 'scheduler-evening', model: 'claude-sonnet-4-5' });
+    } catch (err) {
+      log.error({ err }, 'scheduled reflection (evening) failed');
+    }
+  }, { timezone: 'UTC', scheduled: true });
+
+  // Skill candidate delivery — 09:00 Pacific = 17:00 UTC
+  const skillDeliveryJob = cron.schedule('0 17 * * *', async () => {
+    log.info('Running skill candidate delivery');
+    try {
+      await deliverSkillCandidates(pool);
+    } catch (err) {
+      log.error({ err }, 'skill candidate delivery failed');
+    }
+  }, { timezone: 'UTC', scheduled: true });
+
   // Optionally run on start
   if (config.runOnStart) {
     setImmediate(() => runJob().catch((err: unknown) => log.error({ err }, "nightly consolidation job failed")));
@@ -93,6 +123,9 @@ export function startScheduler(
   return {
     stop: () => {
       job.stop();
+      reflectionMorningJob.stop();
+      reflectionEveningJob.stop();
+      skillDeliveryJob.stop();
       if (miniTimer) {
         clearInterval(miniTimer);
         miniTimer = null;
@@ -102,4 +135,34 @@ export function startScheduler(
     runNow: runJob,
     runMiniNow: runMini,
   };
+}
+
+/**
+ * Deliver pending skill candidates by logging them.
+ * Full OpenClaw API delivery is wired in usme-openclaw.
+ */
+async function deliverSkillCandidates(pool: pg.Pool): Promise<void> {
+  const log2 = logger.child({ module: "skill-delivery" });
+  const { rows } = await pool.query(
+    `SELECT id, name, description, trigger_pattern, confidence, source_episode_ids, created_at
+     FROM skill_candidates
+     WHERE approval_status = 'pending'
+     ORDER BY created_at DESC`,
+  );
+
+  if (rows.length === 0) {
+    log2.info("No pending skill candidates");
+    return;
+  }
+
+  log2.info({ count: rows.length }, "Pending skill candidates");
+  for (const candidate of rows) {
+    log2.info({
+      id: candidate.id,
+      name: candidate.name,
+      confidence: candidate.confidence,
+      trigger_pattern: candidate.trigger_pattern,
+      source_episode_count: candidate.source_episode_ids?.length ?? 0,
+    }, `Skill candidate: ${candidate.name}`);
+  }
 }
