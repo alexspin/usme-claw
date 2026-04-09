@@ -186,26 +186,80 @@ export async function runReflection(opts: ReflectionOptions): Promise<Reflection
       `[entity:${e.id}] ${e.name} (${e.entity_type}) canonical=${e.canonical ?? 'none'} relationships=${e.relationships?.length ?? 0}`)
     .join("\n");
 
-  const prompt = `You are reviewing a memory corpus for an AI assistant. Analyze the following memories and provide structured updates.
+  const prompt = `You are the memory curator for an AI assistant called Rufus. Rufus uses a multi-tier semantic memory system called USME (Utility-Shaped Memory Ecology) to maintain persistent knowledge across conversations. Your job is to review the full memory corpus and make structured improvements: consolidating duplicates, correcting stale information, surfacing patterns as reusable skills, and mapping relationships between entities.
 
-## Active Concepts (${concepts.length})
+This is not a retrieval task. You are acting as an editor — reading the whole library and deciding what to keep, what to merge, what to discard, and what new knowledge should be formalized.
+
+## Why this matters
+
+Without periodic reflection, the memory system accumulates noise: outdated facts that were true once, near-duplicate concepts that should be one entry, ephemeral observations that got promoted to stable knowledge by mistake, and recurring workflows that nobody has formalized as a reusable skill. Your review corrects all of this in a single pass.
+
+## Memory Type Definitions
+
+Before reviewing, understand what each tier holds and what good vs. bad memory looks like for each:
+
+**sensory_trace** — Raw per-turn observations. Specific facts, preferences, decisions, and anomalies captured directly from conversations. These are high-volume and short-lived.
+- Good: "Alex prefers lru-cache over custom Map-based caching"
+- Good: "The gateway restart script must use setsid to detach from the parent process"
+- Bad: "Alex likes clean code" (too vague to act on)
+- Bad: "Rufus helped Alex" (not a fact, just noise)
+
+**episodes** — Narrative summaries of thematic clusters of traces. An episode tells a coherent story: what was attempted, what was decided, what succeeded or failed. Good episodes have a clear subject and outcome and would still be useful to a reader a month from now. Bad episodes are disconnected lists of facts with no unifying thread, or so short they add nothing a trace doesn't already cover.
+
+**concepts** — Stable, long-term knowledge intended to persist indefinitely. A good concept is a durable truth — a preference that holds across projects ("battle-tested libraries over custom implementations"), a decision that was made and stands ("embeddings route through OpenAI, not Anthropic"), or a relationship fact ("Ronan calls Alex weekly at 5:30 PM Pacific"). Bad concepts are too specific to a single event, already superseded by something more recent, or so generic they provide no actionable signal. Concepts that contradict each other need resolution — only one can be true.
+
+**entities** — Named things: people, projects, tools, organizations. An entity is worth tracking when it's referenced frequently enough to warrant mapping its relationships.
+- Good relationship: Alex MAINTAINS usme-claw, Rufus USES ruflo-swarm, nightly.ts GATES ON importance_score
+- Bad relationship: vague associations with no directional meaning ("Alex — USME")
+Orphan entities with no relationships and low reference frequency should be candidates for pruning.
+
+**skills** — Reusable procedures the agent has learned to perform well, extracted from recurring patterns in episodes. A good skill is generalizable: it applies to future situations beyond the specific case that produced it.
+- Good: "How to deploy an OpenClaw plugin" (transfers to any plugin deployment)
+- Good: "How to diagnose a silent DB connectivity failure" (transfers to any DB issue)
+- Bad: "How to fix the USME importance_score schema" (too specific, won't recur)
+- Bad: "Run npm run build from usme-openclaw/" (a step, not a skill)
+Prefer abstract, cross-domain patterns over project-specific how-tos. Ask: if the specific project changed, would this skill still be useful?
+
+## Memory Corpus
+
+### Active Concepts (${concepts.length})
 ${conceptsText || '(none)'}
 
-## Recent Episodes (${episodes.length})
+### Recent Episodes (${episodes.length})
 ${episodesText || '(none)'}
 
-## Recent Sensory Traces last 48h (${traces.length})
+### Recent Sensory Traces — last 48h (${traces.length})
 ${tracesText || '(none)'}
 
-## Entities (${entities.length})
+### Entities (${entities.length})
 ${entitiesText || '(none)'}
 
-Review the corpus and provide:
-1. Concept updates: raise/lower importance, deprecate outdated concepts, merge duplicates
-2. New skills: recurring patterns worth capturing as reusable procedures
-3. Contradictions: conflicting concepts that need resolution
-4. Entity updates: relationship corrections, reclassifications
-5. Overall assessment of memory health`;
+## Instructions
+
+**Step 1 — Reason first.**
+
+Before producing any output, think through the corpus carefully. Use a <thinking> block for your reasoning. Consider:
+- Which concepts are still true vs. stale or superseded?
+- Which concepts are near-duplicates that should be merged?
+- What patterns recur across multiple episodes that would make a generalizable skill?
+- Which entities have enough relationship evidence to warrant updates?
+- Are there any contradictions that need a winner picked?
+
+Do not rush to the structured output. The thinking block is where you do the real work. The structured output should follow naturally from that reasoning.
+
+**Step 2 — Produce structured output.**
+
+After your thinking block, call the reflection_output tool with:
+
+1. **concept_updates** — raise/lower importance, deprecate outdated or superseded concepts, merge duplicates. For each, ask: Is this still true? Is it specific enough to be useful? Is it already captured more precisely elsewhere?
+
+2. **new_skills** — patterns that recur across multiple episodes and would transfer to similar future situations. Only include skills with confidence >= 0.5; anything lower is not worth proposing. Prefer fewer, higher-quality skills over a long list of marginal ones.
+
+3. **contradictions** — concepts that conflict with each other or with recent episode evidence. Pick the winner based on recency and strength of evidence, not just the confidence score alone.
+
+4. **entity_updates** — add relationships that are clearly established by episode and trace evidence. Skip speculative or one-off associations.
+
+5. **overall_assessment** — grade the corpus health (A/B/C/D), identify the most important gaps or improvement opportunities, and flag any patterns that should be addressed before the next reflection run.`;
 
   // ── Phase 3: LLM call ──────────────────────────────────
   const anthropicKey = process.env.ANTHROPIC_API_KEY ?? "";
