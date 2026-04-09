@@ -146,9 +146,14 @@ export async function runReflection(opts: ReflectionOptions): Promise<Reflection
      GROUP BY e.id`,
   );
 
+  const { rows: existingSkills } = await pool.query(`SELECT name FROM skills ORDER BY name`);
+  const existingSkillNames = existingSkills.length > 0
+    ? existingSkills.map((r: { name: string }) => `"${r.name}"`).join(', ')
+    : '(none yet)';
+
   const fetchDurationMs = Date.now() - fetchStart;
   log.info(
-    { concepts: concepts.length, episodes: episodes.length, traces: traces.length, entities: entities.length, durationMs: fetchDurationMs },
+    { concepts: concepts.length, episodes: episodes.length, traces: traces.length, entities: entities.length, existingSkills: existingSkills.length, durationMs: fetchDurationMs },
     "reflection corpus fetched",
   );
 
@@ -253,7 +258,7 @@ After your thinking block, call the reflection_output tool with:
 
 1. **concept_updates** — raise/lower importance, deprecate outdated or superseded concepts, merge duplicates. For each, ask: Is this still true? Is it specific enough to be useful? Is it already captured more precisely elsewhere?
 
-2. **new_skills** — patterns that recur across multiple episodes and would transfer to similar future situations. Only include skills with confidence >= 0.5; anything lower is not worth proposing. Prefer fewer, higher-quality skills over a long list of marginal ones.
+2. **new_skills** — patterns that recur across multiple episodes and would transfer to similar future situations. Only include skills with confidence >= 0.5; anything lower is not worth proposing. Prefer fewer, higher-quality skills over a long list of marginal ones. **Do not propose a skill whose name already exists in the skills table** — duplicates will be silently dropped. Existing skill names: ${existingSkillNames}.
 
 3. **contradictions** — concepts that conflict with each other or with recent episode evidence. Pick the winner based on recency and strength of evidence, not just the confidence score alone.
 
@@ -467,7 +472,8 @@ After your thinking block, call the reflection_output tool with:
         if (skill.confidence >= 0.7) {
           await client2.query(
             `INSERT INTO skills (name, description, status, skill_path, source_episode_ids, teachability, metadata)
-             VALUES ($1, $2, 'candidate', $3, $4, $5, $6)`,
+             VALUES ($1, $2, 'candidate', $3, $4, $5, $6)
+             ON CONFLICT (name) DO NOTHING`,
             [
               skill.name,
               skill.description,
@@ -481,7 +487,8 @@ After your thinking block, call the reflection_output tool with:
           await client2.query(
             `INSERT INTO skill_candidates
                (name, description, trigger_pattern, steps, source_episode_ids, confidence, reflection_run_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (name) DO NOTHING`,
             [
               skill.name,
               skill.description,
