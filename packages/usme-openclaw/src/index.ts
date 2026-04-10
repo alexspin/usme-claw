@@ -187,6 +187,13 @@ export default function usmePlugin(api: {
     start: () => void;
     stop: () => Promise<void>;
   }) => void;
+  registerCommand?: (cmd: {
+    name: string;
+    description: string;
+    acceptsArgs?: boolean;
+    requireAuth?: boolean;
+    handler: (ctx: { commandBody?: string }) => Promise<{ text: string }> | { text: string };
+  }) => void;
 }) {
   const config = resolveConfig(
     api.config?.plugins?.entries?.["usme-claw"]?.config,
@@ -448,22 +455,38 @@ export default function usmePlugin(api: {
     { priority: -5 },
   );
   // ── CLI command registration ──────────────────────────────────────────────
-  api.on("command:usme:reflect", async (event) => {
-    const args = (event.args as string[]) ?? [];
-    try {
-      await reflectCommand(args);
-    } catch (err) {
-      log.error({ err }, "reflect command failed");
-    }
+  api.registerCommand?.({
+    name: "usme:reflect",
+    description: "Run the USME Memory Reflection Service on demand",
+    acceptsArgs: true,
+    requireAuth: false,
+    async handler(ctx: { commandBody?: string }) {
+      const args = (ctx.commandBody ?? "").trim().split(/\s+/).filter(Boolean);
+      try {
+        await reflectCommand(args);
+        return { text: "Reflection complete. Check logs for details." };
+      } catch (err) {
+        log.error({ err }, "reflect command failed");
+        return { text: `Reflection failed: ${err instanceof Error ? err.message : String(err)}` };
+      }
+    },
   });
 
-  api.on("command:usme:promote", async (event) => {
-    const args = (event.args as string[]) ?? [];
-    try {
-      await promoteCommand(args);
-    } catch (err) {
-      log.error({ err }, "promote command failed");
-    }
+  api.registerCommand?.({
+    name: "usme:promote",
+    description: "Review and promote USME skill candidates",
+    acceptsArgs: true,
+    requireAuth: false,
+    async handler(ctx: { commandBody?: string }) {
+      const args = (ctx.commandBody ?? "").trim().split(/\s+/).filter(Boolean);
+      try {
+        await promoteCommand(args);
+        return { text: "Promote session complete." };
+      } catch (err) {
+        log.error({ err }, "promote command failed");
+        return { text: `Promote failed: ${err instanceof Error ? err.message : String(err)}` };
+      }
+    },
   });
 
   // ── System event: candidates ready ────────────────────────────────────────
