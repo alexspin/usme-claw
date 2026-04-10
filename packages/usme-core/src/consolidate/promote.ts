@@ -135,13 +135,13 @@ export function buildPromoteCard(candidates: PromoteSkillCandidate[]): string {
     const ageDays = Math.floor(
       (Date.now() - new Date(c.created_at).getTime()) / (1000 * 60 * 60 * 24),
     );
-    const confStr = c.confidence.toFixed(2);
+    const confStr = Number(c.confidence).toFixed(2);
     const descLine = (c.description ?? "").replace(/\n/g, " ").slice(0, 100);
     const episodeCount = c.source_episode_ids?.length ?? 0;
     const tierBadge = c.quality_tier === "draft" ? " [draft]" : "";
 
     lines.push(
-      `${i + 1}. ${c.name}${tierBadge} (${confStr}) — ${descLine}`,
+      `${i + 1}. ${c.name}${tierBadge} (${confStr}) [id=${c.id}] — ${descLine}`,
     );
     lines.push(
       `   Source: ${episodeCount} episode(s) · ${ageDays}d old · ${c.quality_tier}`,
@@ -195,7 +195,7 @@ export async function getDetailCard(
     `── Skill Candidate #${c.id} ──`,
     `Name:        ${c.name}`,
     `Quality:     ${c.quality_tier}`,
-    `Confidence:  ${c.confidence.toFixed(2)}`,
+    `Confidence:  ${Number(c.confidence).toFixed(2)}`,
     `Age:         ${ageDays} days`,
     `Source:      ${c.source}`,
     `Created:     ${new Date(c.created_at).toLocaleString("en-US", { timeZone: "America/Los_Angeles" })} PT`,
@@ -254,7 +254,7 @@ export async function getEnrichContext(
 
   // 3. Fetch related concepts
   const { rows: conceptRows } = await pool.query(
-    "SELECT name, summary FROM concepts WHERE name ILIKE '%' || $1 || '%' OR summary ILIKE '%' || $1 || '%' ORDER BY updated_at DESC LIMIT 5",
+    "SELECT concept_type AS name, content AS summary FROM concepts WHERE content ILIKE '%' || $1 || '%' ORDER BY updated_at DESC LIMIT 5",
     [candidate.name],
   );
   const relatedConcepts = conceptRows.map((r: any) => ({ name: r.name, summary: r.summary }));

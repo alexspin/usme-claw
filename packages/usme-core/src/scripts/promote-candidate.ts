@@ -4,164 +4,274 @@
  * Runnable directly via: npx tsx packages/usme-core/src/scripts/promote-candidate.ts <id>
  *
  * Args:
- *   <id>   Numeric candidate ID (required)
+ *   <id>        Numeric candidate ID (positional, optional if --pick is given)
+ *   --pick N    Pick the Nth candidate (1-based) from the sorted list (confidence DESC)
+ *
+ * The script is fully self-contained: it writes SKILL.md, computes an embedding,
+ * and updates the DB — no external event firing required.
  */
 
-import { execSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 import {
   getPool,
   closePool,
   getPromoteCandidates,
-  markCandidatePendingWrite,
   getEnrichContext,
+  embedText,
 } from "../index.js";
 
-function buildEnrichEventText(ctx: Awaited<ReturnType<typeof getEnrichContext>>): string {
+// ── SKILL.md builder ───────────────────────────────────────────────────────
+
+function buildSkillMd(ctx: Awaited<ReturnType<typeof getEnrichContext>>): string {
   const episodesSection =
     ctx.sourceEpisodes.length > 0
       ? ctx.sourceEpisodes
-          .map((e) => `  - Episode ${e.id} (${String(e.createdAt).split("T")[0]}): ${e.summary}`)
+          .map(
+            (e) =>
+              `- **Episode ${e.id}** (${String(e.createdAt).split("T")[0]}): ${e.summary}`,
+          )
           .join("\n")
-      : "  (no source episodes recorded)";
+      : "_No source episodes recorded. Manual review recommended._";
 
   const conceptsSection =
     ctx.relatedConcepts.length > 0
-      ? ctx.relatedConcepts.map((c) => `  - ${c.name}: ${c.summary ?? ""}`).join("\n")
-      : "  (no related concepts found)";
+      ? ctx.relatedConcepts.map((c) => `- **${c.name}**: ${c.summary ?? ""}`).join("\n")
+      : "_No related concepts found._";
 
-  return `
-🔨 USME Skill Enrichment Task — candidate ID: ${ctx.candidateId}
+  const stepsSection =
+    ctx.sourceEpisodes.length > 0
+      ? ctx.sourceEpisodes
+          .slice(0, 3)
+          .map(
+            (e, i) =>
+              `${i + 1}. _(from episode ${e.id})_ ${e.summary.slice(0, 300)}`,
+          )
+          .join("\n\n")
+      : "_Steps not yet derived. Populate from source episodes when available._";
 
-Skill to build: "${ctx.name}"
-Description: ${ctx.description}
-Trigger pattern: ${ctx.triggerPattern ?? "not specified"}
-Confidence: ${ctx.confidence} (${ctx.qualityTier})
-Output file: ${ctx.skillPath}
+  return `# ${ctx.name}
 
-Source episodes from USME memory (grounding material):
-${episodesSection}
+> Confidence: ${Number(ctx.confidence).toFixed(2)} | Tier: ${ctx.qualityTier} | Candidate ID: ${ctx.candidateId}
 
-Related concepts:
+## When to Use This Skill
+
+${ctx.description ?? "_No description provided._"}
+
+**Trigger pattern:** ${ctx.triggerPattern ?? "_Not specified._"}
+
+## Prerequisites
+
+_Review source episodes below to identify required tools, env vars, and context._
+
 ${conceptsSection}
 
-Instructions — four-source evidence gathering:
+## Steps
 
-1. Call lcm_expand_query with query="${ctx.name}" and prompt:
-   "What specific commands, error messages, and recovery steps did we use for ${ctx.name}?
-    Include exact command syntax, flags, error text, and what worked."
+_Derived from source episodes. Verify commands before use._
 
-2. Call web_search twice:
-   a) "${ctx.name} best practices site:docs.anthropic.com OR site:postgresql.org OR site:nginx.org"
-      (adapt domain to the skill topic)
-   b) "${ctx.name} common mistakes pitfalls"
+${stepsSection}
 
-3. Read one existing SKILL.md from /home/alex/ai/projects/.openclaw/workspace-rufus/skills/ as a format
-   reference before writing, to ensure consistent structure.
+## Failure Modes
 
-4. Synthesize a complete SKILL.md at: ${ctx.skillPath}
-   The SKILL.md must contain:
-   - YAML frontmatter: name, description, when-to-use, when-NOT-to-use
-   - ## Prerequisites — tools, env vars, config required
-   - ## Steps — numbered, with exact commands, flags, and expected outputs (grounded in LCM evidence)
-   - ## Failure Modes — specific errors and recovery paths (grounded in LCM evidence)
-   - ## Best Practices — from web search, clearly marked as "per documentation"
-   - ## Verification — how to confirm the skill worked
+| Failure | Cause | Recovery |
+|---------|-------|----------|
+| _Not yet documented_ | _See source episodes_ | _Manual review required_ |
 
-5. After writing the file:
-   a) Run this DB update:
-      node -e "const {Pool}=require('pg'); const p=new Pool({host:'localhost',port:5432,database:'usme',user:'usme',password:'usme_dev'}); p.query('UPDATE skills SET enrichment_status=\\'complete\\' WHERE source_candidate_id=$1',[${ctx.candidateId}]).then(()=>p.end())"
-   b) And update skill_candidates:
-      node -e "const {Pool}=require('pg'); const p=new Pool({host:'localhost',port:5432,database:'usme',user:'usme',password:'usme_dev'}); p.query('UPDATE skill_candidates SET enrichment_status=\\'complete\\' WHERE id=$1',[${ctx.candidateId}]).then(()=>p.end())"
-   c) TODO: compute embedding of full SKILL.md body and store in skills.skill_embedding
+## Verification
 
-6. Report back: what LCM evidence was found, what web results added,
-   what was left underspecified (mark those sections with <!-- insufficient grounding --> in the SKILL.md).
+_Add specific checks that confirm the skill completed successfully._
 
-Synthesis rule: Ground all commands and failure modes in what we actually did — use LCM conversation
-history as the primary source and anchor. Use web search to fill gaps, add warnings, and surface better
-practices we may have missed. Where they conflict, prefer our lived experience but note the discrepancy
-with a ⚠️ marker. Never invent commands or options not evidenced in LCM or official documentation.
+## Best Practices
 
-This is a high-quality task. Take the time to do it properly.
-`.trim();
+_To be populated from documentation and experience._
+
+---
+
+## Source Episodes (grounding material)
+
+${episodesSection}
+
+<!-- Generated by usme promote-candidate.ts — enrich with lived experience -->
+`;
 }
+
+// ── Main ───────────────────────────────────────────────────────────────────
 
 async function main() {
   const args = process.argv.slice(2);
-  const idStr = args[0];
 
-  if (!idStr || isNaN(Number(idStr))) {
-    process.stderr.write("Usage: promote-candidate.ts <numeric-candidate-id>\n");
-    process.exit(1);
+  // Parse --pick N
+  let pickIndex: number | undefined;
+  const pickIdx = args.indexOf("--pick");
+  if (pickIdx !== -1) {
+    const pickVal = args[pickIdx + 1];
+    if (!pickVal || isNaN(Number(pickVal))) {
+      process.stderr.write("--pick requires a numeric argument\n");
+      process.exit(1);
+    }
+    pickIndex = parseInt(pickVal, 10);
+    if (pickIndex < 1) {
+      process.stderr.write("--pick N must be >= 1\n");
+      process.exit(1);
+    }
   }
 
-  const candidateId = parseInt(idStr, 10);
+  // Resolve candidate id
   const pool = getPool();
+  let candidateId: number;
 
   try {
-    // Fetch the candidate
-    const candidates = await getPromoteCandidates({ forceAll: true, includeDrafts: true, id: candidateId }, pool);
+    if (pickIndex !== undefined) {
+      // Fetch sorted list and pick by 1-based position
+      const all = await getPromoteCandidates(
+        { forceAll: true, includeDrafts: true },
+        pool,
+      );
+      if (pickIndex > all.length) {
+        process.stderr.write(
+          `--pick ${pickIndex} is out of range. ${all.length} candidate(s) available (1–${all.length}).\n`,
+        );
+        process.exit(1);
+      }
+      candidateId = all[pickIndex - 1].id;
+    } else {
+      const idStr = args.find((a) => !a.startsWith("-"));
+      if (!idStr || isNaN(Number(idStr))) {
+        process.stderr.write(
+          "Usage: promote-candidate.ts <numeric-candidate-id>\n       promote-candidate.ts --pick N\n",
+        );
+        process.exit(1);
+      }
+      candidateId = parseInt(idStr, 10);
+    }
+
+    // Verify candidate exists
+    const candidates = await getPromoteCandidates(
+      { forceAll: true, includeDrafts: true, id: candidateId },
+      pool,
+    );
     if (candidates.length === 0) {
       process.stderr.write(`Candidate ${candidateId} not found.\n`);
       process.exit(1);
     }
     const candidate = candidates[0];
 
-    // Mark accepted
-    await markCandidatePendingWrite(candidate.id, pool);
+    const skillSlug = candidate.name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+    const skillPath = `/home/alex/ai/projects/.openclaw/workspace-rufus/skills/${skillSlug}/SKILL.md`;
 
-    const skillPath = `/home/alex/ai/projects/.openclaw/workspace-rufus/skills/${candidate.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/, "")}/SKILL.md`;
+    // ── Transaction: INSERT skills + UPDATE skill_candidates ──────────────
+    const client = await pool.connect();
+    let skillId: string;
 
-    // Insert into skills table
-    const { rows } = await pool.query<{ id: string }>(
-      `INSERT INTO skills
-         (name, description, status, skill_path, source_episode_ids, teachability,
-          promoted_at, source_candidate_id, generation_notes, metadata)
-       VALUES ($1, $2, 'active', $3, $4, $5, NOW(), $6, $7, $8)
-       ON CONFLICT (name) DO NOTHING
-       RETURNING id`,
-      [
-        candidate.name,
-        candidate.description ?? null,
-        skillPath,
-        candidate.source_episode_ids ?? null,
-        candidate.confidence,
-        candidate.id,
-        JSON.stringify({ from_candidate: candidate.id, quality_tier: candidate.quality_tier }),
-        "{}",
-      ],
-    );
+    try {
+      await client.query("BEGIN");
 
-    if (rows.length === 0) {
-      process.stderr.write(`A skill named "${candidate.name}" already exists — skipping insert.\n`);
-      process.exit(1);
+      // Mark candidate accepted
+      await client.query(
+        `UPDATE skill_candidates
+         SET approval_status = 'accepted', accepted = true, accepted_at = NOW(), updated_at = NOW()
+         WHERE id = $1`,
+        [candidate.id],
+      );
+
+      // Insert into skills
+      const { rows } = await client.query<{ id: string }>(
+        `INSERT INTO skills
+           (name, description, status, skill_path, source_episode_ids, teachability,
+            promoted_at, source_candidate_id, generation_notes, metadata)
+         VALUES ($1, $2, 'active', $3, $4, $5, NOW(), $6, $7, $8)
+         ON CONFLICT (name) DO NOTHING
+         RETURNING id`,
+        [
+          candidate.name,
+          candidate.description ?? null,
+          skillPath,
+          candidate.source_episode_ids ?? null,
+          candidate.confidence,
+          candidate.id,
+          JSON.stringify({ from_candidate: candidate.id, quality_tier: candidate.quality_tier }),
+          "{}",
+        ],
+      );
+
+      if (rows.length === 0) {
+        await client.query("ROLLBACK");
+        process.stderr.write(
+          `A skill named "${candidate.name}" already exists — skipping insert.\n`,
+        );
+        process.exit(1);
+      }
+
+      skillId = rows[0].id;
+
+      // Link candidate to the new skill; mark enrichment pending-write
+      await client.query(
+        `UPDATE skill_candidates
+         SET promoted_skill_id = $2, enrichment_status = 'pending', updated_at = NOW()
+         WHERE id = $1`,
+        [candidate.id, skillId],
+      );
+
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
     }
 
-    const skillId = rows[0].id;
+    // ── Enrichment (outside transaction — recoverable on re-run) ──────────
 
-    // Update candidate with promoted_skill_id
-    await pool.query(
-      `UPDATE skill_candidates SET promoted_skill_id = $2, updated_at = NOW() WHERE id = $1`,
-      [candidate.id, skillId],
-    );
+    // Build context and SKILL.md content
+    const enrichCtx = await getEnrichContext(candidate.id, pool);
+    const skillContent = buildSkillMd(enrichCtx);
 
-    // Mark enrichment pending
+    // Write SKILL.md to disk
+    const skillDir = path.dirname(skillPath);
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(skillPath, skillContent, "utf-8");
+    const lineCount = skillContent.split("\n").length;
+
+    // Compute embedding
+    let embeddingStored = false;
+    const openaiKey = process.env.OPENAI_API_KEY ?? "";
+    if (openaiKey) {
+      try {
+        const vec = await embedText(skillContent, openaiKey);
+        // Store vector in pgvector format: '[x,x,x,...]'
+        const vecLiteral = `[${vec.join(",")}]`;
+        await pool.query(
+          `UPDATE skills SET embedding = $2::vector WHERE id = $1`,
+          [skillId, vecLiteral],
+        );
+        embeddingStored = true;
+      } catch (embedErr) {
+        const msg = embedErr instanceof Error ? embedErr.message : String(embedErr);
+        process.stderr.write(`Warning: embedding failed (${msg}). Re-run to retry.\n`);
+      }
+    } else {
+      process.stderr.write("Warning: OPENAI_API_KEY not set — embedding skipped.\n");
+    }
+
+    // Mark enrichment complete
     await pool.query(
-      `UPDATE skill_candidates SET enrichment_status='pending', updated_at=NOW() WHERE id=$1`,
+      `UPDATE skill_candidates
+       SET enrichment_status = 'complete', updated_at = NOW()
+       WHERE id = $1`,
       [candidate.id],
     );
 
-    // Build enrichment event text
-    const enrichCtx = await getEnrichContext(candidate.id, pool);
-    const eventText = buildEnrichEventText(enrichCtx);
-
-    // Fire system event
-    execSync(`openclaw system event --text ${JSON.stringify(eventText)} --mode now`, {
-      stdio: "inherit",
-    });
-
     process.stdout.write(
-      `✓ Promoted "${candidate.name}" (skill id=${skillId}). Enrichment event fired.\n`,
+      `✓ Promoted "${candidate.name}"
+  skill id   : ${skillId}
+  file path  : ${skillPath}
+  line count : ${lineCount}
+  embedding  : ${embeddingStored ? "stored" : "skipped (no OPENAI_API_KEY)"}
+`,
     );
   } finally {
     await closePool();

@@ -3,6 +3,7 @@
  * Default schedule: "0 3 * * *" (periodic consolidation (default: 3am UTC, configure as needed)).
  */
 
+import { execSync } from "node:child_process";
 import Anthropic from "@anthropic-ai/sdk";
 import cron from "node-cron";
 import type pg from "pg";
@@ -195,13 +196,20 @@ export async function deliverSkillCandidates(
   // Mark candidates as prompted so they won't appear again tomorrow
   await markCandidatesPrompted(candidates.map((c) => c.id), pool);
 
-  // Deliver the card via sendFn if provided, otherwise fall back to stdout
+  // Deliver the card via sendFn if provided, otherwise fire a system event
   const card = buildPromoteCard(candidates);
   if (sendFn) {
     await sendFn(card);
   } else {
-    log2.warn("[usme] deliverSkillCandidates: no sendFn provided, falling back to console.log");
-    console.log(card);
+    const eventText = `[USME-MORNING] ${candidates.length} skill candidate(s) ready for review. Run: npx tsx list-candidates.ts --force`;
+    try {
+      execSync(`openclaw system event --text ${JSON.stringify(eventText)} --mode now`, {
+        stdio: "inherit",
+      });
+    } catch (execErr) {
+      log2.warn({ execErr }, "[usme] deliverSkillCandidates: openclaw system event failed, falling back to console.log");
+      console.log(card);
+    }
   }
 
   log2.info({ count: candidates.length }, "skill candidates delivered for review");
