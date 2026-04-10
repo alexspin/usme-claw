@@ -235,6 +235,7 @@ At 350K tokens, the reflection switches to tiered mode (recent + unseen content 
 
 - Run 1 (2026-04-09, dry-run): 23 concept updates, 5 skill drafts, 3 contradictions, 10 entity updates
 - Run 2 (2026-04-09 22:47 UTC, live): 22 concept updates, 5 skills created, 3 contradictions resolved, 10 entity relationship updates. Grade: A−/B+
+- Run 3–6 (2026-04-10): Subsequent runs post-migration 014. Quality gate enforced (A/A-/B+ only → `skill_candidates` table). 13 candidates total with `source_episode_ids` populated. Grade: B+ or better on all runs.
 
 ---
 
@@ -254,14 +255,14 @@ Resolution options: (A) backfill scores via Haiku API calls (~$0.01 each), (B) b
 
 Sonnet reviews the corpus and drafts skills based on its own judgment. No `importance_score` dependency. Confidence >= 0.7 → written directly to `skills` table as `candidate`. Below 0.7 → `skill_candidates` table for manual approval.
 
-**Status: working.** 5 candidate skills created 2026-04-09:
-- Deploy USME Plugin with Build Verification (teachability 0.92)
-- Design and Launch Swarm for USME Features (0.90)
-- Execute Memory Reflection Service (0.88)
-- Diagnose USME Memory System Health (0.85)
-- Update USME Dashboard Configuration (0.82)
+**Status: working.** 13 candidates pending as of 2026-04-10 (confidence 0.81–0.97). Top candidates:
+- Raise LLM Output Token Ceiling (0.97)
+- Fix PostgreSQL Transaction Poisoning with Savepoints (0.95)
+- Normalize LLM Array Fields Before Schema Validation (0.93)
 
-Skill candidates are delivered daily at 17:00 UTC via agent message when candidates are pending.
+1 active skill promoted: **Fix PostgreSQL Transaction Poisoning with Savepoints** — written to `workspace-rufus/skills/fix-postgresql-transaction-poisoning-with-savepoints/SKILL.md`.
+
+Skill candidates are delivered daily at 17:00 UTC via system event when candidates are pending.
 
 ### Promoting candidates (script-based workflow)
 
