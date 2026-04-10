@@ -9,6 +9,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { getPool } from "../db/pool.js";
 import { logger } from "../logger.js";
+import { isPassing, extractGrade } from "./promote.js";
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -31,11 +32,31 @@ export interface ReflectionResult {
   };
   overallAssessment: string;
   durationMs: number;
+  /** Number of skill_candidates rows written in this run (0 if grade too low). */
+  candidatesCreated: number;
 }
 
 // ── Logger ─────────────────────────────────────────────────
 
 const log = logger.child({ module: "reflect" });
+
+// ── Time helpers ───────────────────────────────────────────
+
+/**
+ * Returns true if the current time is between 06:00 and 22:00 Pacific.
+ * Used to decide whether to deliver skill candidate notifications immediately
+ * or defer them to the morning cron.
+ */
+function isDayTimeInPacific(): boolean {
+  const now = new Date();
+  const hourStr = now.toLocaleString('en-US', {
+    timeZone: 'America/Los_Angeles',
+    hour: 'numeric',
+    hour12: false,
+  });
+  const hour = parseInt(hourStr, 10);
+  return hour >= 6 && hour < 22;
+}
 
 // ── Zod Schemas ────────────────────────────────────────────
 
@@ -393,6 +414,16 @@ After your thinking block, call the reflection_output tool with:
     entityUpdates: output.entity_updates.length,
   }, "reflection output parsed");
 
+  // ── Quality gate ────────────────────────────────────────
+  const grade = extractGrade(output.overall_assessment);
+  const qualityPasses = grade !== "" && isPassing(grade);
+  if (!qualityPasses) {
+    log.warn(
+      { grade: grade || "(unparseable)", assessment: output.overall_assessment.slice(0, 80) },
+      "Skipping skill candidate writes — quality grade below threshold (or unparseable)",
+    );
+  }
+
   if (opts.dryRun) {
     log.info("dry run — skipping all DB writes");
     const durationMs = Date.now() - start;
@@ -407,6 +438,7 @@ After your thinking block, call the reflection_output tool with:
       },
       overallAssessment: output.overall_assessment,
       durationMs,
+      candidatesCreated: 0,
     };
   }
 
@@ -414,6 +446,7 @@ After your thinking block, call the reflection_output tool with:
   const pgPool = getPool();
   const client2 = await pgPool.connect();
   let runId = -1;
+  let candidatesCreated = 0;
 
   const changes = {
     conceptsUpdated: 0,
@@ -471,30 +504,29 @@ After your thinking block, call the reflection_output tool with:
       }
     }
 
-    // Apply new skills
-    for (const skill of output.new_skills) {
-      const sp = `sp_${spCount++}`;
-      await client2.query(`SAVEPOINT ${sp}`);
-      try {
-        if (skill.confidence >= 0.7) {
-          await client2.query(
-            `INSERT INTO skills (name, description, status, skill_path, source_episode_ids, teachability, metadata)
-             VALUES ($1, $2, 'candidate', $3, $4, $5, $6)
-             ON CONFLICT (name) DO NOTHING`,
-            [
-              skill.name,
-              skill.description,
-              `skills/${skill.name.replace(/\s+/g, '-').toLowerCase()}.md`,
-              null,
-              skill.confidence,
-              JSON.stringify({ from_reflection: runId, trigger_pattern: skill.trigger_pattern }),
-            ],
-          );
-        } else {
+    // ── Apply new skills (quality-gated) ────────────────
+    // ALL qualifying candidates (confidence >= 0.5) go to skill_candidates.
+    // quality_tier:
+    //   0.70+ → 'candidate'
+    //   0.50–0.69 → 'draft'
+    //   < 0.50 → skip
+    if (qualityPasses) {
+      for (const skill of output.new_skills) {
+        if (skill.confidence < 0.5) {
+          log.info({ name: skill.name, confidence: skill.confidence }, "skill skipped — confidence below 0.5");
+          continue;
+        }
+
+        const qualityTier = skill.confidence >= 0.7 ? 'candidate' : 'draft';
+
+        const sp = `sp_${spCount++}`;
+        await client2.query(`SAVEPOINT ${sp}`);
+        try {
           await client2.query(
             `INSERT INTO skill_candidates
-               (name, description, trigger_pattern, steps, source_episode_ids, confidence, reflection_run_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
+               (name, description, trigger_pattern, steps, source_episode_ids,
+                confidence, reflection_run_id, quality_tier, source)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'reflect')
              ON CONFLICT (name) DO NOTHING`,
             [
               skill.name,
@@ -504,15 +536,22 @@ After your thinking block, call the reflection_output tool with:
               skill.source_episode_ids ?? null,
               skill.confidence,
               runId,
+              qualityTier,
             ],
           );
+          changes.skillsCreated++;
+          candidatesCreated++;
+          await client2.query(`RELEASE SAVEPOINT ${sp}`);
+        } catch (err) {
+          await client2.query(`ROLLBACK TO SAVEPOINT ${sp}`);
+          log.error({ err, skill }, "skill_candidate insert failed — skipping");
         }
-        changes.skillsCreated++;
-        await client2.query(`RELEASE SAVEPOINT ${sp}`);
-      } catch (err) {
-        await client2.query(`ROLLBACK TO SAVEPOINT ${sp}`);
-        log.error({ err, skill }, "skill insert failed — skipping");
       }
+    } else {
+      log.info(
+        { grade, newSkills: output.new_skills.length },
+        "skill candidate writes skipped due to quality gate",
+      );
     }
 
     // Apply contradictions
@@ -573,6 +612,20 @@ After your thinking block, call the reflection_output tool with:
       }
     }
 
+    // ── Post-run notification flag ────────────────────────
+    // If candidates were written, decide whether to notify now or defer to morning.
+    let pendingMorningNotify = false;
+    if (candidatesCreated > 0) {
+      if (isDayTimeInPacific()) {
+        // Daytime: caller will deliver notification immediately based on candidatesCreated > 0.
+        log.info({ candidatesCreated, runId }, "daytime — caller will deliver candidates-ready notification");
+      } else {
+        // Nighttime: set pending_morning_notify so the 09:00 Pacific cron picks it up.
+        pendingMorningNotify = true;
+        log.info({ candidatesCreated, runId }, "nighttime — setting pending_morning_notify=TRUE for morning cron");
+      }
+    }
+
     // Update reflection_run with final stats
     const durationMs = Date.now() - start;
     await client2.query(
@@ -584,7 +637,8 @@ After your thinking block, call the reflection_output tool with:
            contradictions_resolved = $5,
            entities_updated = $6,
            episodes_promoted = $7,
-           overall_assessment = $8
+           overall_assessment = $8,
+           pending_morning_notify = $9
        WHERE id = $1`,
       [
         runId,
@@ -595,18 +649,20 @@ After your thinking block, call the reflection_output tool with:
         changes.entitiesUpdated,
         changes.episodesPromoted,
         output.overall_assessment,
+        pendingMorningNotify,
       ],
     );
 
     await client2.query("COMMIT");
 
-    log.info({ runId, changes, durationMs }, "reflection consume complete");
+    log.info({ runId, changes, candidatesCreated, durationMs }, "reflection complete");
 
     return {
       runId,
       changes,
       overallAssessment: output.overall_assessment,
       durationMs,
+      candidatesCreated,
     };
   } catch (err) {
     await client2.query("ROLLBACK");

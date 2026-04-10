@@ -9,6 +9,11 @@ import type pg from "pg";
 import { runNightlyConsolidation, stepEpisodify } from "./nightly.js";
 import type { NightlyConfig, NightlyResult } from "./nightly.js";
 import { runReflection } from "./reflect.js";
+import {
+  getPromoteCandidates,
+  buildPromoteCard,
+  markCandidatesPrompted,
+} from "./promote.js";
 import { logger } from "../logger.js";
 
 // ── Types ──────────────────────────────────────────────────
@@ -85,7 +90,12 @@ export function startScheduler(
   const reflectionMorningJob = cron.schedule('0 16 * * *', async () => {
     log.info('Starting scheduled reflection (08:00 Pacific)');
     try {
-      await runReflection({ triggerSource: 'scheduler-morning', model: 'claude-sonnet-4-5' });
+      const result = await runReflection({ triggerSource: 'scheduler-morning', model: 'claude-sonnet-4-5' });
+      // If candidates were written and we're in daytime, deliver them immediately
+      if (result.candidatesCreated > 0) {
+        log.info({ candidatesCreated: result.candidatesCreated }, 'reflection produced candidates — delivering now');
+        await deliverSkillCandidates(pool);
+      }
     } catch (err) {
       log.error({ err }, 'scheduled reflection (morning) failed');
     }
@@ -94,7 +104,11 @@ export function startScheduler(
   const reflectionEveningJob = cron.schedule('0 4 * * *', async () => {
     log.info('Starting scheduled reflection (20:00 Pacific)');
     try {
-      await runReflection({ triggerSource: 'scheduler-evening', model: 'claude-sonnet-4-5' });
+      const result = await runReflection({ triggerSource: 'scheduler-evening', model: 'claude-sonnet-4-5' });
+      // Evening reflection: if daytime (unlikely at 20:00), deliver; otherwise the morning cron handles it
+      if (result.candidatesCreated > 0) {
+        log.info({ candidatesCreated: result.candidatesCreated }, 'reflection produced candidates — scheduling morning delivery via flag');
+      }
     } catch (err) {
       log.error({ err }, 'scheduled reflection (evening) failed');
     }
@@ -138,31 +152,47 @@ export function startScheduler(
 }
 
 /**
- * Deliver pending skill candidates by logging them.
- * Full OpenClaw API delivery is wired in usme-openclaw.
+ * Deliver pending skill candidates.
+ * Queries promotable candidates, formats them as a card, marks them prompted,
+ * clears any pending_morning_notify flags, then prints the card to stdout
+ * (which OpenClaw routes to the active conversation session).
+ *
+ * Also checks for runs with pending_morning_notify=true that were set
+ * when a reflection ran outside daytime hours.
  */
-async function deliverSkillCandidates(pool: pg.Pool): Promise<void> {
+export async function deliverSkillCandidates(pool: pg.Pool): Promise<void> {
   const log2 = logger.child({ module: "skill-delivery" });
-  const { rows } = await pool.query(
-    `SELECT id, name, description, trigger_pattern, confidence, source_episode_ids, created_at
-     FROM skill_candidates
-     WHERE approval_status = 'pending'
-     ORDER BY created_at DESC`,
+
+  // Clear pending_morning_notify flags from old runs
+  const { rows: pendingRuns } = await pool.query(
+    `SELECT id FROM reflection_runs
+     WHERE pending_morning_notify = TRUE
+       AND created_at > NOW() - INTERVAL '7 days'`,
   );
 
-  if (rows.length === 0) {
-    log2.info("No pending skill candidates");
+  if (pendingRuns.length > 0) {
+    const pendingIds = pendingRuns.map((r: { id: number }) => r.id);
+    await pool.query(
+      `UPDATE reflection_runs SET pending_morning_notify = FALSE WHERE id = ANY($1)`,
+      [pendingIds],
+    );
+    log2.info({ count: pendingIds.length }, "cleared pending_morning_notify flags");
+  }
+
+  // Fetch promotable candidates
+  const candidates = await getPromoteCandidates({ includeDrafts: false }, pool);
+
+  if (candidates.length === 0) {
+    log2.info("No skill candidates ready for morning delivery");
     return;
   }
 
-  log2.info({ count: rows.length }, "Pending skill candidates");
-  for (const candidate of rows) {
-    log2.info({
-      id: candidate.id,
-      name: candidate.name,
-      confidence: candidate.confidence,
-      trigger_pattern: candidate.trigger_pattern,
-      source_episode_count: candidate.source_episode_ids?.length ?? 0,
-    }, `Skill candidate: ${candidate.name}`);
-  }
+  // Mark candidates as prompted so they won't appear again tomorrow
+  await markCandidatesPrompted(candidates.map((c) => c.id), pool);
+
+  // Print the card — OpenClaw routes stdout from command handlers to the active session
+  const card = buildPromoteCard(candidates);
+  console.log(card);
+
+  log2.info({ count: candidates.length }, "skill candidates delivered for review");
 }

@@ -2,8 +2,9 @@
  * Tests for the Memory Reflection Service (reflect.ts).
  *
  * Verifies:
- *   - Skills with confidence >= 0.7 go to skills table with status='candidate'
- *   - Skills with confidence < 0.7 go to skill_candidates table
+ *   - All skills (confidence >= 0.5) go to skill_candidates (never directly to skills)
+ *   - quality_tier='candidate' for confidence >= 0.70, 'draft' for 0.50–0.69
+ *   - Quality gate: only writes candidates when overall_assessment is A/A-/B+
  *   - --dry-run returns results without making any DB writes
  */
 
@@ -39,7 +40,10 @@ vi.mock("../../src/db/pool.js", () => ({
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function makeReflectionResponse(skills: { name: string; description: string; confidence: number }[]): unknown {
+function makeReflectionResponse(
+  skills: { name: string; description: string; confidence: number }[],
+  grade = "A-",
+): unknown {
   return {
     content: [
       {
@@ -50,7 +54,8 @@ function makeReflectionResponse(skills: { name: string; description: string; con
           new_skills: skills,
           contradictions: [],
           entity_updates: [],
-          overall_assessment: "Memory health looks good.",
+          // overall_assessment must start with a passing grade for candidates to be written
+          overall_assessment: `${grade}: Memory health looks good.`,
         },
       },
     ],
@@ -59,12 +64,13 @@ function makeReflectionResponse(skills: { name: string; description: string; con
 }
 
 function makeEmptyCorpusQueries() {
-  // pool.query is called 4 times for corpus fetch: concepts, episodes, traces, entities
+  // pool.query is called 5 times for corpus fetch: concepts, episodes, traces, entities, existing skills
   mockQuery
     .mockResolvedValueOnce({ rows: [] }) // concepts
     .mockResolvedValueOnce({ rows: [] }) // episodes
     .mockResolvedValueOnce({ rows: [] }) // traces
-    .mockResolvedValueOnce({ rows: [] }); // entities
+    .mockResolvedValueOnce({ rows: [] }) // entities
+    .mockResolvedValueOnce({ rows: [] }); // existing skill names (SELECT name FROM skills)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -88,7 +94,7 @@ describe("runReflection — skill confidence routing", () => {
       .mockResolvedValue({ rows: [] }); // All subsequent queries
   });
 
-  it("routes confidence=0.8 skill to skills table with status=candidate", async () => {
+  it("routes confidence=0.8 skill to skill_candidates with quality_tier=candidate", async () => {
     makeEmptyCorpusQueries();
 
     mockMessagesCreate.mockResolvedValue(
@@ -101,16 +107,19 @@ describe("runReflection — skill confidence routing", () => {
 
     expect(result.changes.skillsCreated).toBe(1);
 
-    // Find the INSERT call that went to the skills table
-    const skillInsertCall = mockClient.query.mock.calls.find(
+    // All skills go to skill_candidates, never directly to skills
+    const candidateInsertCall = mockClient.query.mock.calls.find(
+      (call: unknown[]) => typeof call[0] === "string" && (call[0] as string).includes("INSERT INTO skill_candidates"),
+    );
+    expect(candidateInsertCall).toBeDefined();
+    // Should NOT insert directly into skills table
+    const skillsInsertCall = mockClient.query.mock.calls.find(
       (call: unknown[]) => typeof call[0] === "string" && (call[0] as string).includes("INSERT INTO skills"),
     );
-    expect(skillInsertCall).toBeDefined();
-    // The SQL literal includes 'candidate' as the status value
-    expect(skillInsertCall![0]).toContain("candidate");
+    expect(skillsInsertCall).toBeUndefined();
   });
 
-  it("routes confidence=0.5 skill to skill_candidates table", async () => {
+  it("routes confidence=0.5 skill to skill_candidates with quality_tier=draft", async () => {
     makeEmptyCorpusQueries();
 
     mockMessagesCreate.mockResolvedValue(
@@ -123,7 +132,7 @@ describe("runReflection — skill confidence routing", () => {
 
     expect(result.changes.skillsCreated).toBe(1);
 
-    // INSERT should go to skill_candidates, not skills
+    // INSERT goes to skill_candidates with quality_tier='draft' (0.50–0.69)
     const candidateInsertCall = mockClient.query.mock.calls.find(
       (call: unknown[]) => typeof call[0] === "string" && (call[0] as string).includes("INSERT INTO skill_candidates"),
     );
@@ -140,8 +149,8 @@ describe("runReflection — skill confidence routing", () => {
 
     mockMessagesCreate.mockResolvedValue(
       makeReflectionResponse([
-        { name: "HighConf", description: "Would go to skills", confidence: 0.8 },
-        { name: "LowConf", description: "Would go to candidates", confidence: 0.4 },
+        { name: "HighConf", description: "Would become candidate tier", confidence: 0.8 },
+        { name: "MidConf", description: "Would become draft tier", confidence: 0.55 },
       ]),
     );
 
@@ -152,7 +161,7 @@ describe("runReflection — skill confidence routing", () => {
     // dry-run returns runId=-1
     expect(result.runId).toBe(-1);
     expect(result.changes.skillsCreated).toBe(2);
-    expect(result.overallAssessment).toBe("Memory health looks good.");
+    expect(result.overallAssessment).toContain("Memory health looks good.");
 
     // pool.connect should NOT have been called (no transaction)
     expect(mockConnect).not.toHaveBeenCalled();

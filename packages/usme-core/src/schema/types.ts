@@ -115,6 +115,8 @@ export interface ReflectionRun {
   status: string;
   rolled_back: boolean;
   created_at: Date;
+  // Migration 014:
+  pending_morning_notify: boolean;
 }
 
 export interface SkillCandidate {
@@ -132,6 +134,13 @@ export interface SkillCandidate {
   rejected_at?: Date;
   created_at: Date;
   updated_at: Date;
+  // Migration 014 columns:
+  prompted_at?: Date;
+  quality_tier: 'draft' | 'candidate';
+  defer_until?: Date;
+  dismissed_at?: Date;
+  promoted_skill_id?: string;  // UUID text — references skills(id)
+  source: 'reflect' | 'nightly';
 }
 
 export interface ShadowComparison {

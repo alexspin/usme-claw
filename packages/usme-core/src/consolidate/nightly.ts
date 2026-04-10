@@ -19,7 +19,6 @@ import {
   insertEpisode,
   insertConcept,
   deactivateConcept,
-  insertSkill,
 } from "../db/queries.js";
 import { stepReconcile } from "./reconcile.js";
 import { embedText } from "../embed/index.js";
@@ -83,15 +82,7 @@ const ContradictionOutputSchema = z.object({
   reasoning: z.string(),
 });
 
-const SkillSchema = z.object({
-  name: z.string(),
-  description: z.string(),
-  teachability: z.number().min(0).max(1),
-});
-
-const SkillDraftOutputSchema = z.object({
-  skills: z.array(SkillSchema),
-});
+// SkillSchema and SkillDraftOutputSchema removed — stepSkillDraft retired in favour of reflect.ts pipeline.
 
 // ── Helpers ────────────────────────────────────────────────
 
@@ -486,113 +477,21 @@ export async function stepContradictions(
   return resolved;
 }
 
-// ── Step 4: Skill Candidate Drafting ───────────────────────
+// ── Step 4: Skill Candidate Drafting (retired) ─────────────
 
 /**
- * Identify recurring action patterns in episodes and draft skill candidates.
+ * Skill drafting from nightly.ts has been retired.
+ * All skill candidate production now goes through reflect.ts.
+ * This stub preserves the call site in runNightlyConsolidation without breaking anything.
  */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 export async function stepSkillDraft(
-  client: Anthropic,
-  pool: pg.Pool,
-  config: NightlyConfig,
+  _client: Anthropic,
+  _pool: pg.Pool,
+  _config: NightlyConfig,
 ): Promise<number> {
-  // Find recent episodes with high utility that haven't been skill-checked
-  const { rows: episodes } = await pool.query(
-    `SELECT id, summary, session_ids
-     FROM episodes
-     WHERE importance_score >= 7
-       AND metadata->>'skill_checked_at' IS NULL
-     ORDER BY created_at DESC
-     LIMIT 30`,
-  );
-
-  if (episodes.length === 0) {
-    log.info("Step 4: No episodes eligible for skill drafting");
-    return 0;
-  }
-
-  const serialized = episodes
-    .map((e: { id: string; summary: string }, i: number) => `[${i + 1}] ${e.summary}`)
-    .join("\n\n");
-
-  const response = await client.messages.create({
-    model: config.opusModel ?? config.sonnetModel ?? "claude-sonnet-4-5",
-    max_tokens: 4096,
-    tools: [{
-      name: "draft_skill",
-      description: "Identify repeatable workflows or procedures from episode summaries and draft them as reusable skill candidates.",
-      input_schema: {
-        type: "object" as const,
-        properties: {
-          skills: {
-            type: "array",
-            items: {
-              type: "object",
-              properties: {
-                name: { type: "string", description: "Concise skill name" },
-                description: { type: "string", description: "What the skill does and how to apply it" },
-                teachability: { type: "number", description: "0.0 to 1.0, where 1.0 means easily replicable" },
-              },
-              required: ["name", "description", "teachability"],
-            },
-          },
-        },
-        required: ["skills"],
-      },
-    }],
-    tool_choice: { type: "tool", name: "draft_skill" },
-    messages: [
-      {
-        role: "user",
-        content: `Analyze these episode summaries and identify any repeatable workflows, procedures, or techniques that could be extracted as reusable "skills" (templates for future tasks). If no skills are worth drafting, return an empty array.\n\nEpisodes:\n${serialized}`,
-      },
-    ],
-  });
-
-  const skillResult = SkillDraftOutputSchema.safeParse(extractToolInput(response, "draft_skill"));
-  if (!skillResult.success) {
-    log.error({ error: skillResult.error }, "stepSkillDraft: schema validation failed");
-    return 0;
-  }
-  const { skills } = skillResult.data;
-
-  let drafted = 0;
-  for (const s of skills) {
-    const skillId = await insertSkill(pool, {
-      name: s.name,
-      description: s.description,
-      embedding: null,
-      status: "candidate",
-      skill_path: `skills/${s.name.replace(/\s+/g, "-").toLowerCase()}.md`,
-      source_episode_ids: episodes.map((e: { id: string }) => e.id),
-      teachability: s.teachability,
-      metadata: { drafted_at: new Date().toISOString() },
-    });
-    if (config.embeddingApiKey) {
-      try {
-        const vec = await embedText(s.description, config.embeddingApiKey);
-        await pool.query(
-          "UPDATE skills SET embedding = $1::vector WHERE id = $2",
-          [JSON.stringify(vec), skillId],
-        );
-        log.info(`embedded skill ${skillId}`);
-      } catch (err) {
-        log.error({ err }, `embed skill ${skillId} failed`);
-      }
-    }
-    drafted++;
-  }
-
-  // Mark episodes as skill-checked
-  const episodeIds = episodes.map((e: { id: string }) => e.id);
-  await pool.query(
-    `UPDATE episodes SET metadata = metadata || '{"skill_checked_at": "${new Date().toISOString()}"}'::jsonb
-     WHERE id = ANY($1)`,
-    [episodeIds],
-  );
-
-  log.info(`Step 4: Drafted ${drafted} skill candidates from ${episodes.length} episodes`);
-  return drafted;
+  log.info("Step 4: stepSkillDraft is retired — skill candidates are produced by reflect.ts");
+  return 0;
 }
 
 // ── Step 5: Decay + Prune ──────────────────────────────────
@@ -639,6 +538,17 @@ export async function stepDecayAndPrune(
   );
 
   const totalPruned = (pruned ?? 0) + (prunedEpisodes ?? 0);
+
+  // Auto-dismiss skill_candidates older than 30 days (still undecided)
+  const { rowCount: candidatesDismissed } = await pool.query(
+    `UPDATE skill_candidates
+     SET dismissed_at = NOW(), updated_at = NOW()
+     WHERE dismissed_at IS NULL
+       AND created_at < NOW() - INTERVAL '30 days'`,
+  );
+  if ((candidatesDismissed ?? 0) > 0) {
+    log.info(`Step 5: Auto-dismissed ${candidatesDismissed} stale skill_candidates (>30 days old)`);
+  }
 
   log.info(
     `Step 5: Decayed ${totalDecayed} items (factor=${decayFactor}), pruned ${totalPruned} expired/low-utility items`,

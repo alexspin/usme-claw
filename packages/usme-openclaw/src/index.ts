@@ -39,6 +39,7 @@ import type { SchedulerHandle, InjectedMemory } from "@usme/core";
 import { resolveConfig } from "./config.js";
 import { spreadingActivation } from "./spread.js";
 import { reflectCommand } from "./commands/reflect.js";
+import { promoteCommand } from "./commands/promote.js";
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -452,6 +453,15 @@ export default function usmePlugin(api: {
       await reflectCommand(args);
     } catch (err) {
       log.error({ err }, "reflect command failed");
+    }
+  });
+
+  api.on("command:usme:promote", async (event) => {
+    const args = (event.args as string[]) ?? [];
+    try {
+      await promoteCommand(args);
+    } catch (err) {
+      log.error({ err }, "promote command failed");
     }
   });
 

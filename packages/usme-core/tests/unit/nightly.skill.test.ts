@@ -56,42 +56,13 @@ function makeSkillDraftResponse(skills: { name: string; description: string; tea
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-describe("stepSkillDraft — importance_score gate", () => {
+describe("stepSkillDraft — no-op stub (superseded by reflect.ts)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("selects only episodes with importance_score >= 7 via DB query", async () => {
-    // Mock pool.query: first call returns episodes, second call is the UPDATE
-    const mockQueryFn = vi.fn()
-      .mockResolvedValueOnce({
-        // Only episode with score=8 returned (score=6 was filtered by DB WHERE clause)
-        rows: [{ id: "ep-high", summary: "High importance episode", session_ids: ["s1"] }],
-      })
-      .mockResolvedValueOnce({ rows: [] }); // UPDATE skill_checked_at
-
-    mockMessagesCreate.mockResolvedValue(
-      makeSkillDraftResponse([{ name: "Test Skill", description: "A skill", teachability: 0.8 }]),
-    );
-
-    const Anthropic = (await import("@anthropic-ai/sdk")).default;
-    const { stepSkillDraft } = await import("../../src/consolidate/nightly.js");
-
-    const client = new Anthropic({ apiKey: "test" });
-    const mockPool = { query: mockQueryFn } as any;
-
-    const result = await stepSkillDraft(client, mockPool, {});
-
-    expect(result).toBe(1);
-
-    // Verify the SQL WHERE clause used importance_score >= 7
-    const sqlCalled = mockQueryFn.mock.calls[0][0] as string;
-    expect(sqlCalled).toContain("importance_score >= 7");
-    expect(sqlCalled).not.toContain("utility_score >= 0.6");
-  });
-
-  it("returns 0 when no episodes have importance_score >= 7", async () => {
-    const mockQueryFn = vi.fn().mockResolvedValueOnce({ rows: [] });
+  it("returns 0 (no-op stub — skill candidate production moved to reflect.ts)", async () => {
+    const mockQueryFn = vi.fn();
 
     const Anthropic = (await import("@anthropic-ai/sdk")).default;
     const { stepSkillDraft } = await import("../../src/consolidate/nightly.js");
@@ -102,18 +73,29 @@ describe("stepSkillDraft — importance_score gate", () => {
     const result = await stepSkillDraft(client, mockPool, {});
 
     expect(result).toBe(0);
-    // LLM should not be called if no episodes qualify
-    expect(mockMessagesCreate).not.toHaveBeenCalled();
   });
 
-  it("does not call LLM when zero qualifying episodes found", async () => {
-    const mockQueryFn = vi.fn().mockResolvedValueOnce({ rows: [] });
+  it("makes no DB calls (no-op stub)", async () => {
+    const mockQueryFn = vi.fn();
 
     const Anthropic = (await import("@anthropic-ai/sdk")).default;
     const { stepSkillDraft } = await import("../../src/consolidate/nightly.js");
 
     const client = new Anthropic({ apiKey: "test" });
     const mockPool = { query: mockQueryFn } as any;
+
+    await stepSkillDraft(client, mockPool, {});
+
+    expect(mockQueryFn).not.toHaveBeenCalled();
+    expect(mockMessagesCreate).not.toHaveBeenCalled();
+  });
+
+  it("does not call LLM (no-op stub)", async () => {
+    const Anthropic = (await import("@anthropic-ai/sdk")).default;
+    const { stepSkillDraft } = await import("../../src/consolidate/nightly.js");
+
+    const client = new Anthropic({ apiKey: "test" });
+    const mockPool = { query: vi.fn() } as any;
 
     await stepSkillDraft(client, mockPool, {});
 
