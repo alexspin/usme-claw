@@ -1,8 +1,8 @@
 # USME Project Status
 
-**Stage:** SHIP (deployed, operational)  
-**Last updated:** 2026-04-09  
-**Owner:** Alex  
+**Stage:** SHIP (deployed, operational)
+**Last updated:** 2026-04-10
+**Owner:** Alex
 
 ---
 
@@ -19,11 +19,14 @@
 | Consolidation pipeline | ✅ Live | Nightly 03:00 UTC + 30min mini |
 | importance_score at creation | ✅ Live | Migration 010, Haiku scores new episodes |
 | Reflection service | ✅ Live | 2× daily (04:00 + 16:00 UTC), CLI available |
-| Skill creation (reflection path) | ✅ Working | 5 candidates created 2026-04-09 |
-| Skill candidate delivery | ✅ Live | Daily cron at 17:00 UTC |
-| Dashboard | ✅ Live | https://collective7.spinelli5.com/usme/ |
+| Skill creation (reflection path) | ✅ Working | 13 candidates pending (confidence 0.81–0.97) |
+| Skill promotion (script-based) | ✅ Live | CLI scripts: list-candidates, promote-candidate, dismiss-candidate |
+| Skill candidate delivery | ✅ Live | Morning cron at 17:00 UTC fires when candidates pending |
+| Dashboard | ✅ Live | https://collective7.spinelli5.com/usme/ (unified server, port 3456) |
 | Privacy flags (exclude_from_reflection) | ✅ Schema | Migration 013, nothing excluded by default |
-| Migrations 001–013 | ✅ Applied | All live on production DB |
+| Migrations 001–014 | ✅ Applied | All live on production DB |
+| HEARTBEAT noise filter | ✅ Live | critic.ts + extraction guard in index.ts |
+| before_message_write hook | ✅ Live | Strips <usme-context> blocks before transcript storage |
 
 ---
 
@@ -46,9 +49,17 @@ All 160 episodes created before migration 010 have `importance_score = 5` (hardc
 
 298 entities extracted, 0–1 relationships each. Spreading activation runs but adds minimal items. Will improve gradually as the reflection service makes entity relationship updates on each run.
 
-### Skill candidates not promoted to active
+### Skill candidate source_episode_ids (pre-f17b306)
 
-The 5 skills created 2026-04-09 have `status = 'candidate'` and `embedding = null`. They appear in the dashboard but are not injected into context. Promote to `active` and generate embeddings when ready.
+Candidates from reflect runs before commit f17b306 have `source_episode_ids = null`. Enrichment context will be limited for those candidates. New runs populate correctly.
+
+### Item caps not yet implemented
+
+`pack.ts`/`modes.ts` item caps not yet implemented — episodes can still dominate injection budget (~27 items at 300–400 tokens each).
+
+### Orphaned rows in skills table
+
+21 rows in `skills` table with `status='candidate'` from pre-migration reflect runs are invisible to the promotion flow (which reads `skill_candidates`). They don't block operation but represent stale data.
 
 ### reconcile.ts model version drift
 
@@ -59,9 +70,9 @@ The 5 skills created 2026-04-09 have `status = 'candidate'` and `embedding = nul
 ## Next planned work
 
 1. **Importance score backfill** — decide strategy (A/B/C) and execute
-2. **Promote candidate skills to active** — generate embeddings, flip status
+2. **Promote remaining skill candidates** — 13 pending with confidence 0.81–0.97
 3. **Entity relationship graph density** — manual seeding or tune reflection prompts to produce more relationship updates
-4. **Reflect prompt tuning** — current skill candidates are too operationally specific (project how-tos); tune toward generalizable cross-domain patterns
+4. **Item caps (pack.ts)** — prevent episode tier from dominating injection budget
 5. **reconcile.ts model config** — consolidate to single model config source
 6. **Local embeddings** — Ollama nomic-embed-text would save ~400ms/turn; deferred from v1
 
@@ -78,3 +89,4 @@ The 5 skills created 2026-04-09 have `status = 'candidate'` and `embedding = nul
 | 2026-04-06 | SHIP | Active mode deployed 20:58 UTC |
 | 2026-04-08 | SHIP | Refactor: pino, node-cron, tool_use + Zod, tiktoken |
 | 2026-04-09 | SHIP | Reflection service, spreading activation, dashboard, migrations 010–013 |
+| 2026-04-10 | SHIP | Migration 014, reflect/promote pipeline, script-based promotion, unified dashboard, HEARTBEAT filter, before_message_write hook |

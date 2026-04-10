@@ -1,6 +1,6 @@
 # USME Architecture Reference
 
-_Last updated: 2026-04-09. Reflects deployed state after migrations 001–013._
+_Last updated: 2026-04-10. Reflects deployed state after migrations 001–014._
 
 ---
 
@@ -58,6 +58,10 @@ usme-claw/
 │           ├── telemetry.ts            ← writeInjectionLog(), InjectionLogEntry
 │           └── commands/
 │               └── reflect.ts          ← CLI: openclaw usme reflect
+│   └── usme-core/src/scripts/          ← Standalone promotion scripts (no plugin dep)
+│       ├── list-candidates.ts          ← Lists pending skill candidates with confidence scores
+│       ├── promote-candidate.ts        ← --pick N: writes SKILL.md, computes embedding, updates DB
+│       └── dismiss-candidate.ts        ← Dismisses a candidate by ID
 ```
 
 ---
@@ -98,7 +102,11 @@ Inbound message
              └── Appends JSON line to /tmp/usme/injection.jsonl
 ```
 
-**Total latency:** ~54ms P50, dominated by the OpenAI embedding call (~420ms).  
+**Total latency:** ~54ms P50, dominated by the OpenAI embedding call (~420ms).
+
+### before_message_write hook
+
+After the turn completes and OpenClaw writes the message to the transcript, a `before_message_write` hook strips `<usme-context>` blocks from the message content before storage. This prevents the injected memory block (~10K tokens) from accumulating across stored messages — without it, each stored message would carry the context block forward, compounding across turns. The `stripMetadataEnvelope` call in `before_prompt_build` only strips from the live system prompt; it does not affect the agentMessages array.  
 The embedding call runs first to hide latency behind LCM processing.
 
 ---
@@ -173,8 +181,8 @@ scheduler.ts (node-cron) OR openclaw usme reflect CLI
            │
            ├─► applyUpdates()          atomic transaction
            │    ├── Update/merge/deprecate concepts
-           │    ├── Insert skills (confidence >= 0.7 → skills table as 'candidate')
-           │    ├── Insert skill_candidates (confidence < 0.7 → manual review queue)
+           │    ├── Insert skill_candidates (quality-gated: A/A-/B+ tiers only)
+           │    │    └── All candidates go to skill_candidates table for manual review
            │    ├── Resolve contradictions
            │    └── Add/remove/update entity relationships
            │
@@ -281,7 +289,7 @@ scheduler.ts (node-cron) OR openclaw usme reflect CLI
 | overall_assessment | text | Full Sonnet assessment text |
 | status | text | `success` \| `error` \| `rolled_back` |
 
-### `skill_candidates` (migration 012)
+### `skill_candidates` (migrations 012 + 014)
 | Column | Type | Notes |
 |---|---|---|
 | id | serial | PK |
@@ -289,6 +297,24 @@ scheduler.ts (node-cron) OR openclaw usme reflect CLI
 | confidence | float | Gate: >= 0.7 → skills table, < 0.7 → here |
 | approval_status | enum | `pending` \| `accepted` \| `rejected` |
 | reflection_run_id | int | FK → reflection_runs |
+| quality_tier | text | Added migration 014 |
+| prompted_at | timestamptz | Added migration 014 — last time delivered to user |
+| defer_until | timestamptz | Added migration 014 — skip until date |
+| dismissed_at | timestamptz | Added migration 014 |
+| source | text | Added migration 014 |
+| source_episode_ids | int[] | Episode IDs used for enrichment context |
+
+### `skills` additions (migration 014)
+| Column | Type | Notes |
+|---|---|---|
+| promoted_at | timestamptz | When candidate was accepted |
+| source_candidate_id | int | FK → skill_candidates |
+| generation_notes | text | Enrichment notes from promote script |
+
+### `reflection_runs` additions (migration 014)
+| Column | Type | Notes |
+|---|---|---|
+| pending_morning_notify | bool | Set when candidates ready but not yet delivered |
 
 ---
 

@@ -117,7 +117,7 @@ Skills are distilled from episodes when the system identifies a recurring, teach
 - `confidence`: reflection service confidence score (gate: >= 0.7)
 - `reflection_run_id`: which reflection run produced this candidate
 
-Skills are surfaced via two paths — see [Skill Creation](#skill-creation). There are currently 5 candidate skills (created via reflection on 2026-04-09) and 0 active skills.
+Skills are surfaced via two paths — see [Skill Creation](#skill-creation). There are currently 13 candidate skills pending (confidence 0.81–0.97) and 1 active skill promoted via the script-based workflow.
 
 ---
 
@@ -137,6 +137,8 @@ On every turn, USME runs the following pipeline synchronously before the LLM pro
 ```
 
 Total hot-path latency: ~54ms (dominated by the embedding call). Injection adds the `<usme-context>` block seen at the top of every turn's system prompt.
+
+A `before_message_write` hook strips `<usme-context>` blocks before messages are written to the transcript, preventing the +10K token/turn accumulation that would otherwise occur as injected blocks compound across stored messages.
 
 ---
 
@@ -259,7 +261,22 @@ Sonnet reviews the corpus and drafts skills based on its own judgment. No `impor
 - Diagnose USME Memory System Health (0.85)
 - Update USME Dashboard Configuration (0.82)
 
-Skill candidates are delivered daily at 17:00 UTC via agent message for approve/reject review.
+Skill candidates are delivered daily at 17:00 UTC via agent message when candidates are pending.
+
+### Promoting candidates (script-based workflow)
+
+```bash
+# List pending candidates with confidence scores
+npx tsx packages/usme-core/src/scripts/list-candidates.ts
+
+# Promote candidate by position (1-based, sorted by confidence desc)
+npx tsx packages/usme-core/src/scripts/promote-candidate.ts --pick 1
+
+# Dismiss a candidate by ID
+npx tsx packages/usme-core/src/scripts/dismiss-candidate.ts <id>
+```
+
+`promote-candidate.ts` is self-contained: it writes `SKILL.md` to the workspace skills directory, computes an embedding, and updates the DB — all in a single transaction. No Rufus session or external event required.
 
 ---
 
@@ -324,11 +341,12 @@ There is **one copy** of the built plugin. esbuild writes directly to the extens
 npm run migrate    # from packages/usme-core
 ```
 
-Migrations 001–013 are applied. Key additions:
+Migrations 001–014 are applied. Key additions:
 - 010: `importance_score` on episodes
 - 011: `reflection_runs` table
 - 012: `skill_candidates` table
 - 013: `exclude_from_reflection` on all 4 tiers
+- 014: `quality_tier`, `prompted_at`, `defer_until`, `dismissed_at`, `source` on skill_candidates; `promoted_at`, `source_candidate_id`, `generation_notes` on skills; `pending_morning_notify` on reflection_runs
 
 ---
 

@@ -1,3 +1,66 @@
+# Changes: Context Accumulation Fix + HEARTBEAT Filter (2026-04-10)
+
+## Fix 1 — HEARTBEAT noise filter in critic.ts (HIGH)
+
+**File:** `packages/usme-core/src/assemble/critic.ts`
+
+**Problem:** Heartbeat system events ("HEARTBEAT") were creating sensory traces and being scored for injection. These contain no useful memory content and polluted the candidate pool.
+
+**Fix:** Added a mandatory hard-discard rule in `criticFilter()`:
+```ts
+if (/\bHEARTBEAT\b/i.test(c.content)) continue; // heartbeat_noise
+```
+This runs before dedup, after the confidence and isActive checks, on every candidate before injection.
+
+---
+
+## Fix 2 — Extraction guard for HEARTBEAT turns (HIGH)
+
+**File:** `packages/usme-openclaw/src/index.ts`
+
+**Problem:** Even with the critic filter, HEARTBEAT turns were still triggering Haiku fact and entity extraction, burning API calls and writing worthless sensory_trace rows.
+
+**Fix:** Before enqueueing extractions in `before_prompt_build`, the plugin now checks `serializedTurn` for the HEARTBEAT pattern:
+```ts
+if (/\bHEARTBEAT\b/i.test(serializedTurn)) {
+  // fall through to injection return below — skip extraction entirely
+}
+```
+No extraction is enqueued for heartbeat turns. The retrieval + injection pipeline still runs (heartbeat turns still benefit from context).
+
+---
+
+## Fix 3 — before_message_write hook strips <usme-context> blocks (CRITICAL)
+
+**File:** `packages/usme-openclaw/src/index.ts`
+
+**Problem:** `prependContext` injects a `<usme-context>` block (~10K tokens) into the system prompt each turn. OpenClaw stores the full message — including the injected context — in the transcript/agentMessages array. On the next turn, the stored message is loaded, and `<usme-context>` blocks accumulate: turn 2 has 1×, turn 3 has 2×, etc. By turn 10, the context window grows by ~100K extra tokens, eventually causing truncation or OOM.
+
+**Why `stripMetadataEnvelope` wasn't enough:** `stripMetadataEnvelope` runs in `before_prompt_build` and strips the current system prompt before the query is extracted. But it does not affect the `agentMessages` array, which is what gets stored in the transcript. Stored messages carry the full context block forward.
+
+**Fix:** New `before_message_write` hook that strips `<usme-context>` blocks from any message before it is written to storage:
+```ts
+api.on("before_message_write", (event) => {
+  // strips <usme-context>...</usme-context> from string and array-of-blocks content
+});
+```
+Handles both `content: string` and `content: ContentBlock[]` (Anthropic SDK format).
+
+---
+
+## Fix 4 — reflect.ts source_episode_ids population (MEDIUM)
+
+**File:** `packages/usme-core/src/consolidate/reflect.ts`
+
+**Problem:** The Sonnet reflection prompt did not explicitly ask for `source_episode_ids` in skill candidates. The LLM omitted the field or set it to null. Without episode IDs, `promote-candidate.ts` cannot retrieve enrichment context from the source episodes.
+
+**Fix:** Updated the reflect prompt to instruct the LLM:
+> "Populate source_episode_ids with the numeric IDs of the episodes that most clearly demonstrate this pattern."
+
+Candidates from runs before commit f17b306 still have null source_episode_ids — enrichment for those will use concept/entity context only.
+
+---
+
 # Changes: USME Promotion Pipeline Fixes
 
 ## Fix 1 — Concepts schema column names (CRITICAL)
