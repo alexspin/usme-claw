@@ -29,11 +29,81 @@ import {
   markCandidateDismissed,
   deferCandidate,
   markCandidatePendingWrite,
+  getEnrichContext,
 } from "@usme/core";
-import type { PromoteSkillCandidate } from "@usme/core";
+import type { PromoteSkillCandidate, EnrichContext } from "@usme/core";
 import { logger } from "@usme/core";
 
 const log = logger.child({ module: "promote-command" });
+
+// ── Enrichment event builder ─────────────────────────────────
+
+function buildEnrichEventText(ctx: EnrichContext): string {
+  const episodesSection = ctx.sourceEpisodes.length > 0
+    ? ctx.sourceEpisodes
+        .map(e => `  - Episode ${e.id} (${String(e.createdAt).split('T')[0]}): ${e.summary}`)
+        .join('\n')
+    : '  (no source episodes recorded)';
+
+  const conceptsSection = ctx.relatedConcepts.length > 0
+    ? ctx.relatedConcepts
+        .map(c => `  - ${c.name}: ${c.summary ?? ''}`)
+        .join('\n')
+    : '  (no related concepts found)';
+
+  return `
+🔨 USME Skill Enrichment Task — candidate ID: ${ctx.candidateId}
+
+Skill to build: "${ctx.name}"
+Description: ${ctx.description}
+Trigger pattern: ${ctx.triggerPattern ?? 'not specified'}
+Confidence: ${ctx.confidence} (${ctx.qualityTier})
+Output file: ${ctx.skillPath}
+
+Source episodes from USME memory (grounding material):
+${episodesSection}
+
+Related concepts:
+${conceptsSection}
+
+Instructions:
+Use all available tools to build a complete, grounded SKILL.md for "${ctx.name}".
+Do NOT invent procedural steps. Every command, flag, and failure mode must come from
+real evidence — LCM conversation history, USME episodes, or verified documentation.
+
+Required research steps:
+1. Call lcm_expand_query with query="${ctx.name}" and a focused prompt asking for
+   exact steps, commands, failure modes, and recovery paths from past conversations.
+2. Call lcm_grep to find specific relevant messages (error messages, exact CLI flags,
+   config values) related to this skill topic.
+3. Search USME episodes table for any additional episodes related to "${ctx.name}"
+   beyond the source episodes listed above.
+4. If the skill involves external tools or APIs, call web_search for current best
+   practices and known failure modes.
+
+Once research is complete, synthesize a complete SKILL.md following the OpenClaw skill
+format (read /home/alex/ai/projects/.openclaw/workspace-rufus/skills/debugging/SKILL.md
+as the format reference). Every section must be grounded in real evidence. Use:
+  <!-- insufficient grounding: add detail after first use -->
+for any section where you cannot find specific evidence.
+
+After writing the file:
+1. Write the SKILL.md to: ${ctx.skillPath}
+2. Run this SQL to mark the skill active in the DB:
+   PGPASSWORD=usme_dev psql -h localhost -U usme -d usme -c "
+     INSERT INTO skills (name, description, status, skill_path, teachability, metadata)
+     VALUES ('${ctx.name.replace(/'/g, "''")}', '${ctx.description.replace(/'/g, "''")}', 'active', '${ctx.skillPath}',
+             ${ctx.confidence}, '{}')
+     ON CONFLICT (name) DO UPDATE SET
+       status = 'active', skill_path = EXCLUDED.skill_path, updated_at = NOW()
+     RETURNING id;"
+   Then: UPDATE skill_candidates SET enrichment_status='complete', accepted=true,
+     accepted_at=NOW() WHERE id=${ctx.candidateId};
+3. Report: what you found in LCM, what you wrote, what was left underspecified.
+
+This is a high-quality task. Take the time to do it properly.
+`.trim();
+}
 
 // ── Promotion (insert to skills table) ──────────────────────
 
@@ -91,6 +161,31 @@ async function promoteToSkill(
     },
     "skill candidate promoted to active skill",
   );
+
+  // Get enrichment context and fire system event to wake Rufus for SKILL.md synthesis
+  try {
+    const enrichCtx = await getEnrichContext(candidate.id, pool);
+    const eventText = buildEnrichEventText(enrichCtx);
+
+    // Mark enrichment as pending before firing
+    await pool.query(
+      "UPDATE skill_candidates SET enrichment_status='pending', updated_at=NOW() WHERE id=$1",
+      [candidate.id],
+    );
+
+    // Fire system event — this wakes Rufus's main session with full tool access
+    const { execSync } = await import("node:child_process");
+    execSync(
+      `openclaw system event --text ${JSON.stringify(eventText)} --mode now`,
+      { stdio: 'inherit' },
+    );
+
+    console.log(`\n🔨 Enrichment task fired for "${candidate.name}".`);
+    console.log(`   Rufus will synthesize the SKILL.md using LCM history and USME memories.`);
+    console.log(`   Output: ${enrichCtx.skillPath}`);
+  } catch (err) {
+    log.warn({ err, candidateId: candidate.id }, "enrichment event fire failed — skill promoted but enrichment not triggered");
+  }
 
   return skillId;
 }

@@ -65,8 +65,8 @@ export function isPassing(grade: string): boolean {
  * e.g. "B+ — memory health is good..." → "B+"
  */
 export function extractGrade(overallAssessment: string): string {
-  const m = overallAssessment.match(/^([A-Da-d][+\-]?)/i);
-  return m ? m[1].toUpperCase() : "";
+  const m = overallAssessment.match(/\b([A-D][+\-]?)(?=\b|\*|\/|\s|$)/i);
+  return m ? m[1] : "";
 }
 
 // ── Query ──────────────────────────────────────────────────
@@ -211,6 +211,83 @@ export async function getDetailCard(
   ];
 
   return lines.join("\n");
+}
+
+// ── Enrichment context ─────────────────────────────────────
+
+export interface EnrichContext {
+  candidateId: number;
+  name: string;
+  description: string;
+  triggerPattern: string | null;
+  confidence: number;
+  qualityTier: string;
+  slug: string;
+  skillPath: string;
+  sourceEpisodes: Array<{ id: number; summary: string; createdAt: string }>;
+  relatedConcepts: Array<{ name: string; summary: string }>;
+  reflectionRunGrade: string | null;
+}
+
+export async function getEnrichContext(
+  candidateId: number,
+  db?: pg.Pool,
+): Promise<EnrichContext> {
+  const pool = db ?? getPool();
+
+  // 1. Fetch candidate
+  const { rows: [candidate] } = await pool.query(
+    "SELECT * FROM skill_candidates WHERE id = $1",
+    [candidateId],
+  );
+  if (!candidate) throw new Error(`Candidate ${candidateId} not found`);
+
+  // 2. Fetch source episodes
+  let sourceEpisodes: Array<{ id: number; summary: string; createdAt: string }> = [];
+  if (candidate.source_episode_ids?.length) {
+    const { rows } = await pool.query(
+      "SELECT id, summary, created_at FROM episodes WHERE id = ANY($1) ORDER BY created_at DESC LIMIT 10",
+      [candidate.source_episode_ids],
+    );
+    sourceEpisodes = rows.map((r: any) => ({ id: r.id, summary: r.summary, createdAt: r.created_at }));
+  }
+
+  // 3. Fetch related concepts
+  const { rows: conceptRows } = await pool.query(
+    "SELECT name, summary FROM concepts WHERE name ILIKE '%' || $1 || '%' OR summary ILIKE '%' || $1 || '%' ORDER BY updated_at DESC LIMIT 5",
+    [candidate.name],
+  );
+  const relatedConcepts = conceptRows.map((r: any) => ({ name: r.name, summary: r.summary }));
+
+  // 4. Fetch reflection run grade if available
+  let reflectionRunGrade: string | null = null;
+  if (candidate.reflection_run_id) {
+    const { rows: [run] } = await pool.query(
+      "SELECT overall_assessment FROM reflection_runs WHERE id = $1",
+      [candidate.reflection_run_id],
+    );
+    if (run?.overall_assessment) {
+      reflectionRunGrade = extractGrade(run.overall_assessment);
+    }
+  }
+
+  // 5. Compute slug and skillPath
+  const slug = candidate.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  const skillPath = `/home/alex/ai/projects/.openclaw/workspace-rufus/skills/${slug}/SKILL.md`;
+
+  return {
+    candidateId: candidate.id,
+    name: candidate.name,
+    description: candidate.description,
+    triggerPattern: candidate.trigger_pattern ?? null,
+    confidence: candidate.confidence,
+    qualityTier: candidate.quality_tier,
+    slug,
+    skillPath,
+    sourceEpisodes,
+    relatedConcepts,
+    reflectionRunGrade,
+  };
 }
 
 // ── State mutations ────────────────────────────────────────

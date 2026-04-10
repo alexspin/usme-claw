@@ -27,6 +27,8 @@ export interface SchedulerConfig extends NightlyConfig {
   miniConsolidationIntervalMs?: number;
   /** Number of turns between mini-consolidations. Default: 50. */
   miniConsolidationTurnThreshold?: number;
+  /** Optional function to send skill candidate cards to the user's chat session. */
+  sendFn?: (message: string) => void | Promise<void>;
 }
 
 export interface SchedulerHandle {
@@ -94,7 +96,7 @@ export function startScheduler(
       // If candidates were written and we're in daytime, deliver them immediately
       if (result.candidatesCreated > 0) {
         log.info({ candidatesCreated: result.candidatesCreated }, 'reflection produced candidates — delivering now');
-        await deliverSkillCandidates(pool);
+        await deliverSkillCandidates(pool, config.sendFn);
       }
     } catch (err) {
       log.error({ err }, 'scheduled reflection (morning) failed');
@@ -118,7 +120,7 @@ export function startScheduler(
   const skillDeliveryJob = cron.schedule('0 17 * * *', async () => {
     log.info('Running skill candidate delivery');
     try {
-      await deliverSkillCandidates(pool);
+      await deliverSkillCandidates(pool, config.sendFn);
     } catch (err) {
       log.error({ err }, 'skill candidate delivery failed');
     }
@@ -160,7 +162,10 @@ export function startScheduler(
  * Also checks for runs with pending_morning_notify=true that were set
  * when a reflection ran outside daytime hours.
  */
-export async function deliverSkillCandidates(pool: pg.Pool): Promise<void> {
+export async function deliverSkillCandidates(
+  pool: pg.Pool,
+  sendFn?: (message: string) => void | Promise<void>,
+): Promise<void> {
   const log2 = logger.child({ module: "skill-delivery" });
 
   // Clear pending_morning_notify flags from old runs
@@ -190,9 +195,14 @@ export async function deliverSkillCandidates(pool: pg.Pool): Promise<void> {
   // Mark candidates as prompted so they won't appear again tomorrow
   await markCandidatesPrompted(candidates.map((c) => c.id), pool);
 
-  // Print the card — OpenClaw routes stdout from command handlers to the active session
+  // Deliver the card via sendFn if provided, otherwise fall back to stdout
   const card = buildPromoteCard(candidates);
-  console.log(card);
+  if (sendFn) {
+    await sendFn(card);
+  } else {
+    log2.warn("[usme] deliverSkillCandidates: no sendFn provided, falling back to console.log");
+    console.log(card);
+  }
 
   log2.info({ count: candidates.length }, "skill candidates delivered for review");
 }

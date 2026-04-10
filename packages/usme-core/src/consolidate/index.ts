@@ -27,5 +27,6 @@ export {
   markCandidatePendingWrite,
   isPassing,
   extractGrade,
+  getEnrichContext,
 } from "./promote.js";
-export type { PromoteSkillCandidate, GetPromoteCandidatesOpts } from "./promote.js";
+export type { PromoteSkillCandidate, GetPromoteCandidatesOpts, EnrichContext } from "./promote.js";

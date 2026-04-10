@@ -229,6 +229,10 @@ export default function usmePlugin(api: {
         cronExpression: config.consolidation.cron,
         miniConsolidationIntervalMs: 30 * 60_000,
         runOnStart: false,
+        sendFn: async (card: string) => {
+          const { execSync } = await import("node:child_process");
+          execSync(`openclaw system event --text ${JSON.stringify(card)} --mode now`, { stdio: 'inherit' });
+        },
       });
       api.logger.info("[usme] consolidation scheduler started");
     }
@@ -406,7 +410,10 @@ export default function usmePlugin(api: {
           .join("\n\n");
 
         dbg(`serializedTurn length=${serializedTurn.length}`);
-        if (serializedTurn) {
+        if (/\bHEARTBEAT\b/i.test(serializedTurn)) {
+          dbg(`extraction skipped: serializedTurn matches HEARTBEAT pattern`);
+          // fall through to injection return below
+        } else if (serializedTurn) {
           const anthropicClient = new Anthropic({ apiKey: anthropicKey });
           const queue = getExtractionQueue();
           dbg(`enqueueing fact extraction model=${config.extraction.model}`);
@@ -454,6 +461,44 @@ export default function usmePlugin(api: {
     },
     { priority: -5 },
   );
+
+  // ── Strip <usme-context> blocks before transcript storage ─────────────────
+  // Prevents the injected memory block from accumulating in stored messages
+  // and growing the context window by ~10K tokens per turn.
+  api.on(
+    "before_message_write",
+    (event) => {
+      const ev = event as { message?: { content?: unknown } };
+      if (!ev.message) return;
+      const msg = ev.message as { content?: unknown };
+
+      const strip = (s: string): string =>
+        s.replace(/<usme-context>[\s\S]*?<\/usme-context>\s*/g, "");
+
+      if (typeof msg.content === "string") {
+        const cleaned = strip(msg.content);
+        if (cleaned !== msg.content) {
+          return { message: { ...msg, content: cleaned } };
+        }
+      } else if (Array.isArray(msg.content)) {
+        let changed = false;
+        const newContent = msg.content.map((part: any) => {
+          if (part && typeof part === "object" && part.type === "text" && typeof part.text === "string") {
+            const cleaned = strip(part.text);
+            if (cleaned !== part.text) {
+              changed = true;
+              return { ...part, text: cleaned };
+            }
+          }
+          return part;
+        });
+        if (changed) {
+          return { message: { ...msg, content: newContent } };
+        }
+      }
+    },
+  );
+
   // ── CLI command registration ──────────────────────────────────────────────
   api.registerCommand?.({
     name: "usme-reflect",
@@ -497,7 +542,10 @@ export default function usmePlugin(api: {
     const runId = (event.runId as string | number | undefined) ?? "unknown";
     log.info({ runId }, "[usme] usme:candidates-ready received — delivering skill candidates");
     try {
-      await deliverSkillCandidates(pool);
+      await deliverSkillCandidates(pool, async (card: string) => {
+        const { execSync } = await import("node:child_process");
+        execSync(`openclaw system event --text ${JSON.stringify(card)} --mode now`, { stdio: 'inherit' });
+      });
     } catch (err) {
       log.error({ err }, "usme:candidates-ready delivery failed");
     }
@@ -509,9 +557,14 @@ export default function usmePlugin(api: {
   // listeners (e.g. Rufus agent sessions awaiting enrichment handoff).
   // Note: OpenClaw's api object is event-consumer only; this handler receives
   // the event if the runtime re-dispatches it internally.
-  api.on("usme:promote-approved", async (event) => {
+  api.on("usme:promote-approved", async (event: any) => {
     const candidateId = event.candidateId as string | number | undefined;
-    log.info({ candidateId }, "[usme] usme:promote-approved — enrichment handoff acknowledged");
+    log.info({ candidateId }, "[usme] usme:promote-approved received");
+    // Enrichment is triggered by the promote command firing a system event via
+    // `openclaw system event --mode now`. This wakes the main Rufus session with
+    // full tool access (lcm_expand_query, lcm_grep, web_search, USME DB, etc.)
+    // so it can synthesize a high-quality SKILL.md grounded in real conversation history.
+    // This event handler is reserved for future webhook/notification integrations.
   });
 
   // ── Graceful shutdown ──────────────────────────────────────────────────────
