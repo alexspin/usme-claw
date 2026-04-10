@@ -40,7 +40,6 @@ import type { SchedulerHandle, InjectedMemory } from "@usme/core";
 import { resolveConfig } from "./config.js";
 import { spreadingActivation } from "./spread.js";
 import { reflectCommand } from "./commands/reflect.js";
-import { promoteCommand } from "./commands/promote.js";
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -513,25 +512,6 @@ export default function usmePlugin(api: {
       } catch (err) {
         log.error({ err }, "reflect command failed");
         return { text: `Reflection failed: ${err instanceof Error ? err.message : String(err)}` };
-      }
-    },
-  });
-
-  api.registerCommand?.({
-    name: "usme-promote",
-    description: "Review and promote USME skill candidates",
-    acceptsArgs: true,
-    requireAuth: false,
-    async handler(ctx: { commandBody?: string }) {
-      const args = (ctx.commandBody ?? "").trim().split(/\s+/).filter(Boolean);
-      const parts: string[] = [];
-      const sendReply = async (msg: string) => { parts.push(msg); };
-      try {
-        await promoteCommand(args, sendReply);
-        return { text: parts.join("\n") || "Done." };
-      } catch (err) {
-        log.error({ err }, "promote command failed");
-        return { text: `Promote failed: ${err instanceof Error ? err.message : String(err)}` };
       }
     },
   });
