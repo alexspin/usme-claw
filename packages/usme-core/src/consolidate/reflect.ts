@@ -279,7 +279,7 @@ After your thinking block, call the reflection_output tool with:
 
 1. **concept_updates** — raise/lower importance, deprecate outdated or superseded concepts, merge duplicates. For each, ask: Is this still true? Is it specific enough to be useful? Is it already captured more precisely elsewhere?
 
-2. **new_skills** — patterns that recur across multiple episodes and would transfer to similar future situations. Only include skills with confidence >= 0.5; anything lower is not worth proposing. Prefer fewer, higher-quality skills over a long list of marginal ones. **Do not propose a skill whose name already exists in the skills table** — duplicates will be silently dropped. Existing skill names: ${existingSkillNames}.
+2. **new_skills** — patterns that recur across multiple episodes and would transfer to similar future situations. Only include skills with confidence >= 0.5; anything lower is not worth proposing. Prefer fewer, higher-quality skills over a long list of marginal ones. **Do not propose a skill whose name already exists in the skills table** — duplicates will be silently dropped. Existing skill names: ${existingSkillNames}. For each skill, populate **source_episode_ids** with the numeric IDs of the episodes that evidence the pattern (e.g. [42, 67] — use the episode ID numbers from the corpus above, not strings).
 
 3. **contradictions** — concepts that conflict with each other or with recent episode evidence. Pick the winner based on recency and strength of evidence, not just the confidence score alone.
 

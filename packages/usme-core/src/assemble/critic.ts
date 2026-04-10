@@ -34,6 +34,7 @@ export function criticFilter(
     if (c.utilityPrior === "discard") continue;
     if (c.confidence < minConfidence) continue;
     if (c.isActive === false) continue;
+    if (/\bHEARTBEAT\b/i.test(c.content)) continue; // heartbeat_noise
 
     // --- Soft rules ---
     // Deduplicate semantically similar items (cosine distance < 0.05)
