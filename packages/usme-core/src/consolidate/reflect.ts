@@ -437,7 +437,10 @@ After your thinking block, call the reflection_output tool with:
     runId = runRows[0].id;
 
     // Apply concept updates
+    let spCount = 0;
     for (const update of output.concept_updates) {
+      const sp = `sp_${spCount++}`;
+      await client2.query(`SAVEPOINT ${sp}`);
       try {
         if (update.action === 'deprecate') {
           await client2.query(
@@ -461,13 +464,17 @@ After your thinking block, call the reflection_output tool with:
           );
           changes.conceptsUpdated++;
         }
+        await client2.query(`RELEASE SAVEPOINT ${sp}`);
       } catch (err) {
+        await client2.query(`ROLLBACK TO SAVEPOINT ${sp}`);
         log.error({ err, update }, "concept update failed — skipping");
       }
     }
 
     // Apply new skills
     for (const skill of output.new_skills) {
+      const sp = `sp_${spCount++}`;
+      await client2.query(`SAVEPOINT ${sp}`);
       try {
         if (skill.confidence >= 0.7) {
           await client2.query(
@@ -501,26 +508,34 @@ After your thinking block, call the reflection_output tool with:
           );
         }
         changes.skillsCreated++;
+        await client2.query(`RELEASE SAVEPOINT ${sp}`);
       } catch (err) {
+        await client2.query(`ROLLBACK TO SAVEPOINT ${sp}`);
         log.error({ err, skill }, "skill insert failed — skipping");
       }
     }
 
     // Apply contradictions
     for (const contradiction of output.contradictions) {
+      const sp = `sp_${spCount++}`;
+      await client2.query(`SAVEPOINT ${sp}`);
       try {
         await client2.query(
           `UPDATE concepts SET is_active = false, superseded_by = $2, updated_at = NOW() WHERE id = $1`,
           [contradiction.loser_concept_id, contradiction.winner_concept_id],
         );
         changes.contradictionsResolved++;
+        await client2.query(`RELEASE SAVEPOINT ${sp}`);
       } catch (err) {
+        await client2.query(`ROLLBACK TO SAVEPOINT ${sp}`);
         log.error({ err, contradiction }, "contradiction resolution failed — skipping");
       }
     }
 
     // Apply entity updates
     for (const update of output.entity_updates) {
+      const sp = `sp_${spCount++}`;
+      await client2.query(`SAVEPOINT ${sp}`);
       try {
         const details = update.details as Record<string, unknown>;
         if (update.action === 'add_relationship') {
@@ -530,7 +545,7 @@ After your thinking block, call the reflection_output tool with:
              VALUES ($1, $2, $3, $4, NOW(), $5)`,
             [
               update.entity_id,
-              details.target_id ?? update.entity_id,
+              details.target_entity_id ?? details.target_id ?? update.entity_id,
               details.relationship ?? 'related',
               details.confidence ?? 0.8,
               JSON.stringify({ from_reflection: runId }),
@@ -541,7 +556,7 @@ After your thinking block, call the reflection_output tool with:
           await client2.query(
             `UPDATE entity_relationships SET valid_until = NOW()
              WHERE source_id = $1 AND target_id = $2 AND valid_until IS NULL`,
-            [update.entity_id, details.target_id ?? update.entity_id],
+            [update.entity_id, details.target_entity_id ?? details.target_id ?? update.entity_id],
           );
           changes.entitiesUpdated++;
         } else if (update.action === 'reclassify') {
@@ -551,7 +566,9 @@ After your thinking block, call the reflection_output tool with:
           );
           changes.entitiesUpdated++;
         }
+        await client2.query(`RELEASE SAVEPOINT ${sp}`);
       } catch (err) {
+        await client2.query(`ROLLBACK TO SAVEPOINT ${sp}`);
         log.error({ err, update }, "entity update failed — skipping");
       }
     }
