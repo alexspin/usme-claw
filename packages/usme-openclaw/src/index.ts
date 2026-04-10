@@ -33,6 +33,7 @@ import {
   runFactExtraction,
   runEntityExtraction,
   getExtractionQueue,
+  deliverSkillCandidates,
   logger,
 } from "@usme/core";
 import type { SchedulerHandle, InjectedMemory } from "@usme/core";
@@ -463,6 +464,31 @@ export default function usmePlugin(api: {
     } catch (err) {
       log.error({ err }, "promote command failed");
     }
+  });
+
+  // ── System event: candidates ready ────────────────────────────────────────
+  // Fired by external systems or future api.emit() support when skill candidates
+  // are ready for user review. Falls back to the same delivery path as the
+  // morning cron (deliverSkillCandidates prints to stdout, routed by OpenClaw).
+  api.on("usme:candidates-ready", async (event) => {
+    const runId = (event.runId as string | number | undefined) ?? "unknown";
+    log.info({ runId }, "[usme] usme:candidates-ready received — delivering skill candidates");
+    try {
+      await deliverSkillCandidates(pool);
+    } catch (err) {
+      log.error({ err }, "usme:candidates-ready delivery failed");
+    }
+  });
+
+  // ── System event: promote approved ───────────────────────────────────────
+  // Emitted (as a structured event payload) when a user approves a candidate
+  // via the promote CLI. Registered here so OpenClaw can route it to any
+  // listeners (e.g. Rufus agent sessions awaiting enrichment handoff).
+  // Note: OpenClaw's api object is event-consumer only; this handler receives
+  // the event if the runtime re-dispatches it internally.
+  api.on("usme:promote-approved", async (event) => {
+    const candidateId = event.candidateId as string | number | undefined;
+    log.info({ candidateId }, "[usme] usme:promote-approved — enrichment handoff acknowledged");
   });
 
   // ── Graceful shutdown ──────────────────────────────────────────────────────
