@@ -524,47 +524,16 @@ export default function usmePlugin(api: {
     requireAuth: false,
     async handler(ctx: { commandBody?: string }) {
       const args = (ctx.commandBody ?? "").trim().split(/\s+/).filter(Boolean);
+      const parts: string[] = [];
+      const sendReply = async (msg: string) => { parts.push(msg); };
       try {
-        await promoteCommand(args);
-        return { text: "Promote session complete." };
+        await promoteCommand(args, sendReply);
+        return { text: parts.join("\n") || "Done." };
       } catch (err) {
         log.error({ err }, "promote command failed");
         return { text: `Promote failed: ${err instanceof Error ? err.message : String(err)}` };
       }
     },
-  });
-
-  // ── System event: candidates ready ────────────────────────────────────────
-  // Fired by external systems or future api.emit() support when skill candidates
-  // are ready for user review. Falls back to the same delivery path as the
-  // morning cron (deliverSkillCandidates prints to stdout, routed by OpenClaw).
-  api.on("usme:candidates-ready", async (event) => {
-    const runId = (event.runId as string | number | undefined) ?? "unknown";
-    log.info({ runId }, "[usme] usme:candidates-ready received — delivering skill candidates");
-    try {
-      await deliverSkillCandidates(pool, async (card: string) => {
-        const { execSync } = await import("node:child_process");
-        execSync(`openclaw system event --text ${JSON.stringify(card)} --mode now`, { stdio: 'inherit' });
-      });
-    } catch (err) {
-      log.error({ err }, "usme:candidates-ready delivery failed");
-    }
-  });
-
-  // ── System event: promote approved ───────────────────────────────────────
-  // Emitted (as a structured event payload) when a user approves a candidate
-  // via the promote CLI. Registered here so OpenClaw can route it to any
-  // listeners (e.g. Rufus agent sessions awaiting enrichment handoff).
-  // Note: OpenClaw's api object is event-consumer only; this handler receives
-  // the event if the runtime re-dispatches it internally.
-  api.on("usme:promote-approved", async (event: any) => {
-    const candidateId = event.candidateId as string | number | undefined;
-    log.info({ candidateId }, "[usme] usme:promote-approved received");
-    // Enrichment is triggered by the promote command firing a system event via
-    // `openclaw system event --mode now`. This wakes the main Rufus session with
-    // full tool access (lcm_expand_query, lcm_grep, web_search, USME DB, etc.)
-    // so it can synthesize a high-quality SKILL.md grounded in real conversation history.
-    // This event handler is reserved for future webhook/notification integrations.
   });
 
   // ── Graceful shutdown ──────────────────────────────────────────────────────
