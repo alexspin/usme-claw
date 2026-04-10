@@ -456,7 +456,7 @@ export default function usmePlugin(api: {
   );
   // ── CLI command registration ──────────────────────────────────────────────
   api.registerCommand?.({
-    name: "usme:reflect",
+    name: "usme-reflect",
     description: "Run the USME Memory Reflection Service on demand",
     acceptsArgs: true,
     requireAuth: false,
@@ -473,7 +473,7 @@ export default function usmePlugin(api: {
   });
 
   api.registerCommand?.({
-    name: "usme:promote",
+    name: "usme-promote",
     description: "Review and promote USME skill candidates",
     acceptsArgs: true,
     requireAuth: false,
