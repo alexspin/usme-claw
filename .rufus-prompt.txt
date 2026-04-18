@@ -1,213 +1,205 @@
-Use the ruflo MCP swarm to implement the USME memory system improvements defined in the requirements document at:
+You are working on the USME memory system located at:
+  /home/alex/ai/projects/rufus-projects/usme-claw/
 
-  /home/alex/ai/projects/rufus-projects/usme-claw/pm/memory-innovation.md
+The reflect-promote pipeline was implemented last night (commits 5660fef + 6eba839) and is
+architecturally correct but has 4 bugs preventing it from functioning end-to-end. No skills have
+ever reached the `skill_candidates` table despite 4 reflection runs completing. Your job is to
+fix all four bugs, migrate existing data, and verify the full pipeline works.
 
-Read that document in full before doing anything else. It is the single source of truth for this work.
+───────────────────────────────────────────────────────────────────────────────
+MANDATORY READ BEFORE WRITING ANY CODE
+───────────────────────────────────────────────────────────────────────────────
 
-Environment notes:
-- Working directory: /home/alex/ai/projects/rufus-projects/usme-claw/
-- Separate dashboard project: /home/alex/ai/projects/rufus-projects/usme-dashboard/ (create this)
-- Repo already has git configured — do NOT run git init
-- node: v25.8.1, npm available
-- PostgreSQL: localhost:5432, database=usme, user=usme, password=usme_dev
-- Anthropic SDK, pino, node-cron, lru-cache, zod, tiktoken, pg are already installed in usme-core
-- OpenClaw extensions dir: /home/alex/ai/projects/.openclaw/extensions/usme-claw/
+Read these files in order. Do not skip any of them:
 
----
+1. pm/SWARM-ISSUES.md           ← the 4 bugs, root causes, and exact fixes
+2. pm/REFLECT-PROMOTE.md        ← the full spec for what was built
+3. pm/STATUS.md                 ← current system state
+4. docs/ARCHITECTURE.md         ← package layout, data flow, build system
+5. docs/DECISIONS.md            ← why things are the way they are
+6. packages/usme-core/src/consolidate/reflect.ts        ← reflection pipeline
+7. packages/usme-core/src/consolidate/promote.ts        ← extractGrade, isPassing, DB fns
+8. packages/usme-core/src/consolidate/scheduler.ts      ← crons, deliverSkillCandidates
+9. packages/usme-openclaw/src/index.ts                  ← morning cron handler, API surface
+10. packages/usme-openclaw/src/commands/promote.ts      ← CLI command
+11. packages/usme-core/db/migrations/014_skill_candidates_promote.sql  ← schema
+12. packages/usme-core/tests/unit/promote.test.ts       ← existing tests
 
-MANDATORY STARTUP — your very first response must do all three of these things at once, in a single message. Do not split them across multiple messages or agents will run one at a time instead of in parallel.
+───────────────────────────────────────────────────────────────────────────────
+AGENT ROLES AND SEQUENCING
+───────────────────────────────────────────────────────────────────────────────
 
-1. Initialize the swarm using the ruflo MCP tool (swarm_init), with hierarchical topology, 8 agents max, and specialized strategy.
+ARCHITECT runs first. When done, post: done:architect
 
-2. Create a todo list with all agent tasks in one batch — one TodoWrite call covering every agent.
+CODER waits for done:architect, then implements. When done, post: done:coder
 
-3. Spawn every agent at the same time using the Task tool, each with run_in_background set to true. All Task calls go in this same first message.
+QA and TESTER run in parallel after done:coder.
 
----
+───────────────────────────────────────────────────────────────────────────────
+ARCHITECT TASK
+───────────────────────────────────────────────────────────────────────────────
 
-DASHBOARD OBSERVABILITY — mandatory for every agent, no exceptions:
+Read all 12 files listed above. Then write a concise design doc to:
+  docs/SWARM-FIX-DESIGN.md
 
-Before starting:
-  memory_store("plan:<agent-name>", "<what I'll do> | <files I'll touch> | ~<N> min")
+The design doc must cover:
 
-After completing:
-  memory_store("done:<agent-name>", "<one line: what changed>")
+1. **Bug 1 — extractGrade regex fix**
+   - Confirm the current regex and why it fails on `"**Corpus Health: B+**"`
+   - Specify the exact replacement regex or parsing approach
+   - Confirm it handles: plain `"B+"`, `"A-/B+ grade"`, `"**B+**"`, `"Corpus Health: B+"`
+   - Confirm `isPassing()` set is correct: {A+, A, A-, B+}
 
-Only if blocked:
-  memory_store("blocked:<agent-name>", "<what's blocking me>")
+2. **Bug 2 — UNIQUE constraint vs partial index**
+   - Check whether `ON CONFLICT (name) DO NOTHING` resolves against a partial index in PG15
+   - Specify whether a full UNIQUE constraint needs to be added (and via migration or ALTER TABLE)
+   - Check if the existing 21 rows in `skills` will cause FK problems at promote time
 
-Examples:
-  memory_store("plan:architect", "reading existing code + designing all new components | docs/design.md | ~20 min")
-  memory_store("done:architect",  "design written to docs/DESIGN.md, reviewed all existing types and migrations")
-  memory_store("plan:coder",      "implementing all fixes from design | multiple files across usme-core and usme-openclaw | ~60 min")
-  memory_store("done:coder",      "all implementations complete, build passes, migrations run")
-  memory_store("blocked:tester",  "waiting for coder — need migrations to be run before tests pass")
+3. **Bug 3 — Data migration**
+   - Specify the exact SQL to move 21 `skills` rows with `status='candidate'` and
+     `source_candidate_id IS NULL` into `skill_candidates`
+   - Specify the column mapping: teachability → confidence, set quality_tier, source, etc.
+   - Specify cleanup: DELETE those rows from `skills` after migration
+   - Decide: should this be a new migration file (015) or a one-time script?
 
----
+4. **Bug 4 — Morning notification delivery**
+   - Trace `deliverSkillCandidates()` in scheduler.ts to see how it currently outputs the card
+   - Trace how the morning cron in index.ts calls it
+   - Identify what OpenClaw plugin API surface is available for user-facing message delivery
+     (look at api.* methods available in the register function)
+   - Specify the correct delivery mechanism
 
-REQUIREMENTS
+5. **Test plan** — what tests to add/modify for each fix
 
-The full requirements are in memory-innovation.md. Every agent must read it. This section summarises scope and critical constraints only.
+───────────────────────────────────────────────────────────────────────────────
+CODER TASK
+───────────────────────────────────────────────────────────────────────────────
 
-SCOPE — what this swarm builds:
-1. Fix 1: importance_score on episodes (new DB column) + Haiku importance call in stepEpisodify + skill gate change in stepSkillDraft + access-count write-back in bumpAccessCounts
-2. Fix 2: Memory Reflection Service — new file(s) in usme-core/src/consolidate/, new CLI command in usme-openclaw, new DB migrations for reflection run log and skill_candidates tables, skill candidate delivery cron
-3. Fix 3: Spreading activation — new second-pass graph walk in or alongside usme-core/src/assemble/retrieve.ts, extending the existing InjectionLogEntry with spreading metrics
-4. Privacy scaffold: exclude_from_reflection column on sensory_trace, episodes, concepts, entities tables (4 new migrations)
-5. Dashboard: brand new standalone project at ~/ai/projects/rufus-projects/usme-dashboard/ with Express server + HTML/JS frontend, 6 panels, 6 API endpoints, reading from the USME PostgreSQL database and /tmp/usme/injection.jsonl
+Wait for done:architect. Read docs/SWARM-FIX-DESIGN.md. Then implement exactly what the
+architect specified.
 
-EXPLICITLY OUT OF SCOPE (do not implement):
-- Local embeddings (Ollama)
-- Local reflection LLM
-- MoE-gated retrieval weights
-- Tiered corpus filtering (corpus threshold check must be logged, but switching to tiered mode is deferred)
-- Modifying shadow_comparisons or any shadow mode code
+**Fix 1 — promote.ts: extractGrade()**
+- Update the regex so it finds the grade letter anywhere in the string
+- Preserve the existing function signature and return type
+- Do not break any passing tests
 
-NEW FILES vs EXISTING FILES:
-- Default to creating new files. Only edit existing files when the requirements explicitly call for it.
-- Existing files that require edits (and only these):
-  - usme-core/src/consolidate/nightly.ts: add importance scoring in stepEpisodify, change skill gate in stepSkillDraft
-  - usme-core/src/db/queries.ts: add utility write-back in bumpAccessCounts
-  - usme-core/src/assemble/retrieve.ts (or new spread.ts imported here): add spreading activation second pass
-  - usme-openclaw/src/index.ts: extend InjectionLogEntry with spreading fields, add spreading activation call
-  - usme-core/src/schema/types.ts: add importance_score to Episode type, add new types for reflection/skill_candidates
-  - usme-core/db/migrations/: add new migration files (010_ onwards, numbered sequentially)
-  - usme-openclaw/src/index.ts: register CLI command for usme reflect
-  - usme-core/src/consolidate/scheduler.ts: add reflection service to schedule
+**Fix 2 — UNIQUE constraint (if architect confirms needed)**
+- Add migration 015 if a schema change is required
+- Run migration: `DATABASE_URL=postgres://usme:usme_dev@localhost:5432/usme npm run migrate`
+  from `packages/usme-core/`
 
-CRITICAL CONSTRAINTS from existing code — architect must verify all of these before designing:
-- migrations/003_episodes.sql: existing episodes schema. New importance_score column added via migration 010.
-- migrations/005_skills.sql: existing skills table. status field is 'candidate'|'active'|'retired', not a boolean.
-- migrations/006_entities.sql: entity_relationships uses valid_from/valid_until for soft deletes — use this pattern, don't hard delete.
-- src/schema/types.ts: all TypeScript interfaces for existing tables. New code must match or extend these, never contradict them.
-- src/assemble/types.ts: RetrievalCandidate, InjectedMemory, AssembleResult shapes. Spreading activation adds items to the RetrievalCandidate pool before scoring — it does not bypass score() in score.ts.
-- src/assemble/retrieve.ts: the TIER_QUERIES SQL map. Do not modify these queries. Spreading activation is a new function that runs after retrieve() returns.
-- usme-openclaw/src/index.ts: InjectionLogEntry interface and writeInjectionLog(). Spreading fields must be added as optional fields to InjectionLogEntry — not a new log mechanism.
-- usme-openclaw/src/index.ts: injection log path is /tmp/usme/injection.jsonl (configurable via USME_INJECTION_LOG env var). Dashboard reads from this path.
-- nightly.ts: all LLM calls use tool_use + Zod safeParse. The new Haiku importance call must follow the same pattern already established in stepPromote/stepContradictions/stepSkillDraft.
-- The Anthropic model alias for Sonnet is claude-sonnet-4-5 (matches existing usage in nightly.ts). Haiku is claude-haiku-4-5.
+**Fix 3 — Data migration**
+- Write and run the SQL to migrate 21 pre-swarm skills → skill_candidates
+- Write and run the cleanup DELETE
+- Verify: `SELECT count(*) FROM skill_candidates` should be 21
+- Verify: `SELECT count(*) FROM skills WHERE status='candidate' AND source_candidate_id IS NULL`
+  should be 0
 
-BUILD RULES — all agents must follow:
-- All new TypeScript goes in usme-core/src/ (business logic) or usme-openclaw/src/ (plugin wiring)
-- Never create dist/ inside source repo packages
-- Build command: npm run build from packages/usme-openclaw/ — outputs single bundle to ~/.openclaw/extensions/usme-claw/dist/plugin.js
-- After any usme-claw code change, run npm run build and verify the extensions dir plugin.js timestamp updated
-- New DB migrations: usme-core/db/migrations/, numbered sequentially from 010_
-- Run migrations: npm run migrate from packages/usme-core/
-- Dashboard is usme-dashboard/ — completely separate project, own package.json, own server
+**Fix 4 — Morning notification delivery**
+- Update scheduler.ts and/or index.ts so the morning card reaches the user's session
+- If `api` is not accessible inside scheduler.ts, the correct pattern is to return the card
+  text from `deliverSkillCandidates()` and have the caller in index.ts use the api to send it
 
----
+**After all fixes:**
+Build and verify:
+```bash
+cd packages/usme-openclaw && npm run build
+```
+Build must succeed. Then run tests:
+```bash
+cd packages/usme-core && npm test
+```
+All tests must pass (one pre-existing NaN failure in nightly.skill.test.ts is acceptable).
 
-AGENT INSTRUCTIONS
+Do not commit until QA signals clear.
 
-Log all decisions and findings to swarm memory namespace "usme-innovation".
+───────────────────────────────────────────────────────────────────────────────
+QA TASK
+───────────────────────────────────────────────────────────────────────────────
 
-coordinator:
-  Run: npx claude-flow@v3alpha hooks session-start
-  Read memory-innovation.md in full.
-  Gate agents in this order:
-    1. Architect runs first — no other agent starts until done:architect is set
-    2. Coder starts after done:architect — poll until set
-    3. QA and Tester both start after done:coder — they may run in parallel with each other
-  If any agent posts blocked:<name>, surface the blocker immediately in swarm memory and notify the other agents.
-  After all agents complete: run npm run build from packages/usme-openclaw/ and confirm success. Then run npm run migrate from packages/usme-core/. Then git add -A && git commit -m "feat: usme memory innovation — reflection service, spreading activation, importance scoring, dashboard"
+Wait for done:coder. Validate against pm/SWARM-ISSUES.md and pm/REFLECT-PROMOTE.md.
 
-architect:
-  Poll memory for coordinator confirmation before starting.
-  Read these files thoroughly before designing anything:
-    - packages/usme-core/src/schema/types.ts (all existing types)
-    - packages/usme-core/db/migrations/ (all 9 migration files)
-    - packages/usme-core/src/assemble/types.ts
-    - packages/usme-core/src/assemble/retrieve.ts
-    - packages/usme-core/src/consolidate/nightly.ts
-    - packages/usme-core/src/db/queries.ts
-    - packages/usme-openclaw/src/index.ts
-    - packages/usme-core/src/consolidate/scheduler.ts
+1. **Test extractGrade with all known formats:**
+   ```
+   extractGrade("**Corpus Health: B+**\n\nStrengths:...")  → "B+"
+   extractGrade("Memory corpus health: A-/B+ grade...")    → "A-"
+   extractGrade("**Memory Corpus Health: B+ (Improved)**") → "B+"
+   extractGrade("Corpus Health: A")                       → "A"
+   extractGrade("D - poor corpus")                        → "D"
+   extractGrade("")                                       → ""
+   ```
 
-  Design and document in a new file docs/DESIGN.md:
-    - Exact new DB columns and tables needed (names, types, constraints), consistent with existing migration patterns
-    - Exact new TypeScript types/interfaces to add to schema/types.ts
-    - The memory-review service: file location, exported functions, how it integrates with scheduler.ts
-    - The spreading activation function: signature, where it's called in the assemble pipeline, how it extends InjectionLogEntry
-    - The CLI structure for `openclaw usme reflect` in usme-openclaw
-    - The skill candidate delivery cron: how it queries skill_candidates and sends an agent message via the OpenClaw API
-    - The usme-dashboard project structure: Express server layout, how it reads from injection.jsonl and PostgreSQL
-    - Any edge cases or risks (e.g. importance_score column not yet existing when dashboard first loads)
+2. **Verify skill_candidates has 21 rows, skills has 0 candidates:**
+   ```sql
+   SELECT count(*) FROM skill_candidates;                          -- should be 21
+   SELECT count(*) FROM skills WHERE status='candidate';           -- should be 0
+   SELECT count(*) FROM skill_candidates WHERE quality_tier='candidate';  -- should be ~21
+   ```
 
-  memory_store("done:architect", "design complete in docs/DESIGN.md")
+3. **Run a fresh reflection to verify Bug 1 fix works end-to-end:**
+   ```bash
+   cd packages/usme-core && \
+   DATABASE_URL=postgres://usme:usme_dev@localhost:5432/usme \
+   ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY \
+   OPENAI_API_KEY=$OPENAI_API_KEY \
+   npx tsx run-consolidation.mts
+   ```
+   Wait for completion (~2-3 min). Then check:
+   ```sql
+   SELECT count(*) FROM skill_candidates;  -- should be > 21 if grade passes
+   SELECT count(*) FROM reflection_runs ORDER BY id DESC LIMIT 1;
+   ```
+   If grade was B+ or above, skill_candidates should have gained new rows.
 
-coder:
-  Poll memory for done:architect before starting. Read docs/DESIGN.md in full.
-  Read memory-innovation.md in full.
+4. **Test /usme-promote (after build and gateway restart):**
+   Run `/usme-promote` in the OpenClaw TUI. It should return a formatted candidate card, not
+   "No candidates ready" (since we now have 21 rows in skill_candidates).
 
-  Implement everything — no stubs, no TODOs left behind. The system must be fully functional at the end of your work.
+5. **Check tests pass:** `cd packages/usme-core && npm test`
 
-  usme-core changes (new files preferred, existing files only where listed in requirements):
-    - New migration files 010_ through 01N_ for: importance_score on episodes, reflection run log table, skill_candidates table, exclude_from_reflection on all 4 tiers
-    - Update Episode type in schema/types.ts to include importance_score
-    - Add new types for reflection run log and skill_candidates
-    - Edit nightly.ts stepEpisodify: add Haiku tool_use call to assign importance_score before DB insert
-    - Edit nightly.ts stepSkillDraft: change WHERE clause to use importance_score >= 7
-    - Edit queries.ts bumpAccessCounts: add utility write-back for high-access-count episodes
-    - New file(s) for the Memory Reflection Service in src/consolidate/
-    - Edit scheduler.ts: add reflection service to the cron schedule (08:00 + 20:00 Pacific)
+6. **Check build is clean:** `cd packages/usme-openclaw && npm run build`
 
-  usme-openclaw changes:
-    - Edit index.ts: extend InjectionLogEntry with optional spreading fields
-    - Edit index.ts: add spreading activation call after retrieve(), before score()
-    - New spreading activation function (new file src/spread.ts or in retrieve.ts — match the design)
-    - Edit index.ts or new CLI file: register `openclaw usme reflect` command with --model, --dry-run, --verbose, --tier, --status, --last flags
-    - New skill candidate delivery cron job
+Report findings in docs/SWARM-FIX-QA.md. If anything fails, fix it before signaling done.
+Post: done:qa
 
-  usme-dashboard (new standalone project):
-    - Create ~/ai/projects/rufus-projects/usme-dashboard/ with its own package.json
-    - Express server connecting to same PostgreSQL (same credentials as usme-core)
-    - Reads /tmp/usme/injection.jsonl for Panel 2
-    - All 6 API endpoints fully implemented with real DB queries
-    - HTML/JS frontend with all 6 panels, auto-refresh cadences as specified
-    - Graceful handling of columns that may not exist yet (importance_score, spreading fields)
+───────────────────────────────────────────────────────────────────────────────
+TESTER TASK
+───────────────────────────────────────────────────────────────────────────────
 
-  After implementation: run npm run build from packages/usme-openclaw/ and confirm it succeeds.
-  memory_store("done:coder", "all implementations complete, build passes")
+Wait for done:coder. Add unit tests to `packages/usme-core/tests/unit/promote.test.ts`
+covering the cases QA checks manually in step 1 above, plus:
 
-qa:
-  Poll memory for done:coder before starting. Read memory-innovation.md in full. Read docs/DESIGN.md.
-  Your job is to validate that the implementation matches the requirements — not just that it runs.
+- `isPassing("B+")` → true
+- `isPassing("B")` → false
+- `isPassing("C+")` → false
+- `isPassing("")` → false
+- `extractGrade` with at least 5 different real Sonnet output formats
 
-  Validate against memory-innovation.md panel by panel and fix by fix:
-    - Fix 1: importance_score column exists in migration? Episode type updated? stepEpisodify has Haiku call with tool_use + safeParse? stepSkillDraft gates on importance_score >= 7? bumpAccessCounts has write-back?
-    - Fix 2: Reflection service file exists? Runs without error? CLI flags work (--dry-run, --model, --status)? Reflection run table gets written? skill_candidates table exists and routes correctly above/below 0.7?
-    - Fix 3: Spreading activation runs after retrieve()? InjectionLogEntry has new fields? depth=0 is a no-op?
-    - Exclude flags: migration adds column to all 4 tables? Corpus assembly filters excluded rows?
-    - Dashboard: all 6 panels render with real data? Injection feed auto-refreshes? Reflection history expands correctly? Skills panel shows approval rate?
+Run tests: `cd packages/usme-core && npm test`
+All tests must pass. Post: done:tester
 
-  For any gap found: fix it directly or document it clearly in swarm memory under concerns:qa.
-  memory_store("done:qa", "<summary of what was validated and any gaps found/fixed>")
+───────────────────────────────────────────────────────────────────────────────
+BUILD AND COMMIT (CODER, after done:qa and done:tester)
+───────────────────────────────────────────────────────────────────────────────
 
-tester:
-  Poll memory for done:coder before starting (may run in parallel with QA).
-  Read memory-innovation.md and docs/DESIGN.md.
+```bash
+cd packages/usme-openclaw && npm run build
+cd /home/alex/ai/projects/rufus-projects/usme-claw
+git add -A
+git commit -m "fix: reflect-promote pipeline — grade extraction, data migration, notification delivery"
+```
 
-  Write automated tests for the new code. Place in existing test directories or alongside new files:
-    - Test that stepEpisodify writes importance_score to DB
-    - Test that stepSkillDraft selects only episodes with importance_score >= 7
-    - Test that spreading activation with maxDepth=0 returns identical results to ANN-only
-    - Test that spreading activation with maxDepth=2 adds connected episodes
-    - Test each dashboard API endpoint returns the correct shape
-    - Test that the reflection CLI --dry-run makes no DB writes
-    - Test that skill_candidates routes correctly above and below 0.7 confidence
+Do NOT push. Leave that for Rufus.
 
-  Run existing tests to confirm nothing is broken: npm run test from packages/usme-core/ and packages/usme-openclaw/
-  memory_store("done:tester", "<summary of tests written and test results>")
+───────────────────────────────────────────────────────────────────────────────
+ENVIRONMENT
+───────────────────────────────────────────────────────────────────────────────
 
----
-
-After all agents complete:
-1. npm run build from packages/usme-openclaw/ — confirm success
-2. npm run migrate from packages/usme-core/ — confirm all migrations applied
-3. npm run test from packages/usme-core/ and packages/usme-openclaw/ — confirm all pass
-4. Start usme-dashboard and confirm it loads at localhost with real data
-5. git add -A && git commit -m "feat: usme memory innovation — reflection service, spreading activation, importance scoring, dashboard"
-
-Do not touch .openclaw/ workspace files, MEMORY.md, SOUL.md, AGENTS.md, or TOOLS.md.
-Do NOT run git init — repo already configured.
+- Node: v25.8.1
+- PostgreSQL: localhost:5432, db=usme, user=usme, password=usme_dev
+- ANTHROPIC_API_KEY: available in environment
+- OPENAI_API_KEY: available in environment
+- Build: `npm run build` from packages/usme-openclaw/
+- Test: `npm test` from packages/usme-core/
+- Migrate: `DATABASE_URL=postgres://usme:usme_dev@localhost:5432/usme npm run migrate`
+  from packages/usme-core/

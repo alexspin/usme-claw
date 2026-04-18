@@ -7,6 +7,8 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
+import { jsonrepair } from "jsonrepair";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { getPool } from "../db/pool.js";
 import { logger } from "../logger.js";
 import { isPassing, extractGrade } from "./promote.js";
@@ -74,17 +76,9 @@ const NewSkillSchema = z.object({
   trigger_pattern: z.string().optional(),
   steps: z.unknown().optional(),
   confidence: z.number().min(0).max(1),
-  source_episode_ids: z.array(
-    z.preprocess(v => {
-      if (typeof v === 'number') return v;
-      if (typeof v === 'string') {
-        // Sonnet may return "episode:42" or "42" — extract first digit sequence
-        const m = v.match(/(\d+)/);
-        return m ? parseInt(m[1], 10) : null;
-      }
-      return null;
-    }, z.number().nullable())
-  ).transform(arr => arr.filter((v): v is number => v !== null)).optional(),
+  // Slugs are short kebab-case strings like "fix-postgres-savepoint". We store them as-is
+  // and remap to UUIDs via episodeSlugIndex after the Zod parse.
+  source_episode_ids: z.array(z.string()).optional(),
 });
 
 const ContradictionSchema = z.object({
@@ -197,10 +191,39 @@ export async function runReflection(opts: ReflectionOptions): Promise<Reflection
       `[concept:${c.id}] (${c.concept_type}, util=${c.utility_score.toFixed(2)}, conf=${c.confidence.toFixed(2)}) ${c.content}`)
     .join("\n");
 
+  // Build a slug→UUID map so the LLM gets short memorable keys instead of 36-char UUIDs.
+  // The LLM selects from [ep:<slug>] labels it actually sees in the corpus, then we remap
+  // slugs back to real UUIDs before DB insertion. Avoids the working-memory recall problem
+  // that caused the LLM to invent integers when asked to cite UUIDs from 90K+ tokens back.
+  const episodeSlugIndex = new Map<string, string>(); // slug → uuid
+  const slugCounts = new Map<string, number>();        // for collision dedup
+
+  function makeSlug(summary: string): string {
+    // Take first 6 meaningful words, kebab-case, max 40 chars
+    const slug = summary
+      .toLowerCase()
+      .replace(/[^a-z0-9\s-]/g, '')
+      .trim()
+      .split(/\s+/)
+      .slice(0, 6)
+      .join('-')
+      .slice(0, 40)
+      .replace(/-+$/, '');
+    return slug || 'episode';
+  }
+
   const episodesText = episodes
-    .map((e: { id: string; summary: string; access_count: number; importance_score: number }) =>
-      `[episode:${e.id}] (access=${e.access_count}, importance=${e.importance_score}) ${e.summary}`)
+    .map((e: { id: string; summary: string; access_count: number; importance_score: number }) => {
+      let slug = makeSlug(e.summary);
+      const count = (slugCounts.get(slug) ?? 0) + 1;
+      slugCounts.set(slug, count);
+      if (count > 1) slug = `${slug}-${count}`;
+      episodeSlugIndex.set(slug, e.id);
+      return `[ep:${slug}] (access=${e.access_count}, importance=${e.importance_score}) ${e.summary}`;
+    })
     .join("\n");
+
+  log.debug({ slugCount: episodeSlugIndex.size, slugs: Array.from(episodeSlugIndex.keys()) }, "episode slug index built");
 
   const tracesText = traces
     .map((t: { id: string; memory_type: string | null; content: string }) =>
@@ -279,7 +302,21 @@ After your thinking block, call the reflection_output tool with:
 
 1. **concept_updates** — raise/lower importance, deprecate outdated or superseded concepts, merge duplicates. For each, ask: Is this still true? Is it specific enough to be useful? Is it already captured more precisely elsewhere?
 
-2. **new_skills** — patterns that recur across multiple episodes and would transfer to similar future situations. Only include skills with confidence >= 0.5; anything lower is not worth proposing. Prefer fewer, higher-quality skills over a long list of marginal ones. **Do not propose a skill whose name already exists in the skills table** — duplicates will be silently dropped. Existing skill names: ${existingSkillNames}. For each skill, populate **source_episode_ids** with the numeric IDs of the episodes that evidence the pattern (e.g. [42, 67] — use the episode ID numbers from the corpus above, not strings).
+2. **new_skills** — patterns that recur across multiple episodes and would transfer to similar future situations. Only include skills with confidence >= 0.5; anything lower is not worth proposing. Prefer fewer, higher-quality skills over a long list of marginal ones. **Do not propose a skill whose name already exists in the skills table** — duplicates will be silently dropped. Existing skill names: ${existingSkillNames}. For each skill, populate **source_episode_ids** with the slug strings from the [ep:<slug>] labels in the corpus above that evidence the pattern — copy the slug exactly as it appears (e.g. ["fix-postgres-savepoint-cascade", "debug-max-tokens-truncation"]). Do not invent slugs that are not in the corpus.
+
+**CRITICAL — array field rules:** concept_updates, new_skills, contradictions, and entity_updates MUST always be JSON arrays. If there are no items, return an empty array []. NEVER return a string, null, or words like "None", "N/A", or "NONE" for these fields — those values will be silently lost and the data will be discarded.
+
+**CRITICAL — JSON string encoding rules (read carefully):** All string values inside the tool call JSON MUST follow strict JSON encoding. This means:
+- Newlines inside strings MUST be encoded as the two-character escape sequence \n — NEVER as a literal line break
+- Tabs MUST be encoded as \t — NEVER as a literal tab character
+- Backslashes MUST be encoded as \\
+- Double quotes inside strings MUST be encoded as \"
+- No other ASCII control characters (characters with code points 0–31) are allowed inside JSON strings
+
+For example, a multi-line description MUST be written as a single JSON string like:
+"description": "First sentence. Second sentence.\nThird sentence."
+
+NOT as a literal multi-line block. If you write actual line breaks inside a JSON string value, the JSON becomes invalid and ALL data in that array field will be silently discarded. When in doubt, keep descriptions to a single paragraph with no newlines at all.
 
 3. **contradictions** — concepts that conflict with each other or with recent episode evidence. Pick the winner based on recency and strength of evidence, not just the confidence score alone.
 
@@ -295,6 +332,16 @@ After your thinking block, call the reflection_output tool with:
 
   const client = new Anthropic({ apiKey: anthropicKey });
   const llmStart = Date.now();
+
+  log.debug(
+    {
+      promptLength: prompt.length,
+      episodesTextLength: episodesText.length,
+      episodesText,
+      slugCount: episodeSlugIndex.size,
+    },
+    "reflect llm input"
+  );
 
   const response = await client.messages.create({
     model,
@@ -321,15 +368,15 @@ After your thinking block, call the reflection_output tool with:
           },
           new_skills: {
             type: "array",
+            description: "Must be a JSON array. Use [] if there are no new skills — never return a string or null.",
             items: {
               type: "object",
               properties: {
                 name: { type: "string" },
                 description: { type: "string" },
                 trigger_pattern: { type: "string" },
-                steps: { type: "object" },
                 confidence: { type: "number" },
-                source_episode_ids: { type: "array", items: { type: "number" } },
+                source_episode_ids: { type: "array", items: { type: "string", description: "Slug from [ep:<slug>] label in corpus — copy exactly, do not invent" } },
               },
               required: ["name", "description", "confidence"],
             },
@@ -373,28 +420,92 @@ After your thinking block, call the reflection_output tool with:
 
   log.info({ model, inputTokens, outputTokens, durationMs: llmDurationMs }, "reflection llm_call complete");
 
-  // Normalise LLM output: Sonnet sometimes returns a string (e.g. "None", "N/A")
-  // for array fields when there are no items. Coerce those to empty arrays.
+  // Normalise LLM output: Sonnet sometimes returns array fields as JSON-encoded strings
+  // instead of actual arrays (double-encoding). This happens especially for fields with
+  // complex nested content (multi-line descriptions with literal newlines in string values).
+  // We apply a three-strategy parse to recover the data rather than silently dropping it.
   const rawOutput = extractToolInput(response, "reflection_output") as Record<string, unknown>;
+
+  log.debug(
+    {
+      rawNewSkills: (rawOutput as Record<string, unknown>).new_skills,
+    },
+    "reflect llm raw new_skills (before remap)"
+  );
+
+  try {
+    mkdirSync("/tmp/debug", { recursive: true });
+    writeFileSync(
+      `/tmp/debug/reflect-${Date.now()}.json`,
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        episodesText,
+        slugIndex: Object.fromEntries(episodeSlugIndex),
+        rawNewSkills: (rawOutput as Record<string, unknown>).new_skills,
+      }, null, 2),
+    );
+  } catch (e) {
+    log.warn({ err: String(e) }, "debug dump write failed");
+  }
+
   const arrayFields = ["concept_updates", "new_skills", "contradictions", "entity_updates"] as const;
+
+  function tryParseArray(raw: string): unknown[] | null {
+    // Strategy 1: direct parse (handles correctly-encoded double-encoded arrays)
+    try {
+      const v = JSON.parse(raw);
+      if (Array.isArray(v)) return v;
+    } catch { /* fall through */ }
+
+    // Strategy 2: jsonrepair — battle-tested library that handles unescaped newlines,
+    // tabs, trailing commas, unquoted keys, and other common LLM JSON output mistakes.
+    // This is far more robust than hand-rolled sanitization.
+    try {
+      const repaired = jsonrepair(raw);
+      const v = JSON.parse(repaired);
+      if (Array.isArray(v)) return v;
+    } catch (e2) {
+      log.warn({ parseError: String(e2), sample: raw.slice(0, 500) }, 'strategy 2 (jsonrepair) failed');
+    }
+
+    // Strategy 3: bracket-boundary extraction + jsonrepair.
+    // Find the outermost [ ... ] and attempt to repair+parse just that slice.
+    try {
+      const start = raw.indexOf('[');
+      const end = raw.lastIndexOf(']');
+      if (start !== -1 && end > start) {
+        const slice = raw.slice(start, end + 1);
+        const repaired = jsonrepair(slice);
+        const v = JSON.parse(repaired);
+        if (Array.isArray(v)) return v;
+      }
+    } catch (e3) {
+      log.warn({ parseError: String(e3), sample: raw.slice(0, 500) }, 'strategy 3 (jsonrepair+bracket) failed');
+    }
+
+    return null;
+  }
+
   for (const field of arrayFields) {
     if (!Array.isArray(rawOutput[field])) {
       if (typeof rawOutput[field] === 'string') {
-        try {
-          const parsed = JSON.parse(rawOutput[field] as string);
-          if (Array.isArray(parsed)) {
-            log.info({ field, count: parsed.length }, "normalising JSON string field to array");
-            rawOutput[field] = parsed;
-          } else {
-            log.warn({ field }, "JSON.parse succeeded but result is not an array — coercing to []");
-            rawOutput[field] = [];
-          }
-        } catch {
-          log.warn({ field }, "JSON.parse failed on string field — coercing to []");
+        const rawStr = rawOutput[field] as string;
+        const recovered = tryParseArray(rawStr);
+        if (recovered !== null) {
+          log.info({ field, count: recovered.length }, "recovered double-encoded array field");
+          rawOutput[field] = recovered;
+        } else {
+          log.warn(
+            { field, rawValue: rawStr.slice(0, 300) },
+            "all parse strategies failed on string field — coercing to [] (data lost)",
+          );
           rawOutput[field] = [];
         }
+      } else if (rawOutput[field] == null) {
+        log.warn({ field }, "field is null/undefined — coercing to []");
+        rawOutput[field] = [];
       } else {
-        log.warn({ field, got: typeof rawOutput[field] }, "normalising non-array field to []");
+        log.warn({ field, got: typeof rawOutput[field] }, "field is unexpected type — coercing to []");
         rawOutput[field] = [];
       }
     }
@@ -533,7 +644,34 @@ After your thinking block, call the reflection_output tool with:
               skill.description,
               skill.trigger_pattern ?? null,
               skill.steps ? JSON.stringify(skill.steps) : null,
-              skill.source_episode_ids ?? null,
+              // Remap slugs returned by the LLM back to real UUIDs before DB insertion.
+              // The LLM was shown [ep:<slug>] labels in the corpus; we map each slug to
+              // the UUID we stored in episodeSlugIndex during corpus construction.
+              (() => {
+                if (!skill.source_episode_ids) return null;
+                const mapped: string[] = [];
+                const missed: string[] = [];
+                for (const s of skill.source_episode_ids) {
+                  const uuid = episodeSlugIndex.get(String(s).trim());
+                  if (uuid !== undefined) {
+                    mapped.push(uuid);
+                  } else {
+                    missed.push(String(s).trim());
+                  }
+                }
+                log.warn(
+                  {
+                    skillName: skill.name,
+                    slugsRequested: skill.source_episode_ids.length,
+                    slugsMapped: mapped.length,
+                    slugsMissed: missed.length,
+                    missedSlugs: missed,
+                    mappedUuids: mapped,
+                  },
+                  missed.length > 0 ? "skill episode remap: LLM invented slugs (not in corpus)" : "skill episode remap: all slugs matched",
+                );
+                return mapped.length > 0 ? mapped : null;
+              })(),
               skill.confidence,
               runId,
               qualityTier,

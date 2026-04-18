@@ -1,7 +1,9 @@
 {
   "name": "usme-claw",
   "private": true,
-  "workspaces": ["packages/*"],
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "build": "npm run build --workspaces",
     "test": "npm run test --workspaces",
@@ -17,5 +19,8 @@
   "devDependencies": {
     "typescript": "^5.4",
     "vitest": "^2.0"
+  },
+  "dependencies": {
+    "jsonrepair": "^3.13.3"
   }
 }

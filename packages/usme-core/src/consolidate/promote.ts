@@ -18,7 +18,7 @@ export interface PromoteSkillCandidate {
   description?: string;
   trigger_pattern?: string;
   steps?: unknown;
-  source_episode_ids?: number[];
+  source_episode_ids?: string[];
   confidence: number;
   reflection_run_id?: number;
   approval_status: "pending" | "accepted" | "rejected";
@@ -141,7 +141,7 @@ export function buildPromoteCard(candidates: PromoteSkillCandidate[]): string {
     const tierBadge = c.quality_tier === "draft" ? " [draft]" : "";
 
     lines.push(
-      `${i + 1}. ${c.name}${tierBadge} (${confStr}) [id=${c.id}] — ${descLine}`,
+      `[id=${c.id}] ${c.name}${tierBadge} (conf: ${confStr}) — ${descLine}`,
     );
     lines.push(
       `   Source: ${episodeCount} episode(s) · ${ageDays}d old · ${c.quality_tier}`,
@@ -150,7 +150,7 @@ export function buildPromoteCard(candidates: PromoteSkillCandidate[]): string {
 
   lines.push("");
   lines.push(
-    `Reply with numbers to promote (e.g. "1 3"), "all", "skip", or "detail N" for more.`,
+    `Run: npx tsx promote-candidate.ts <id>  (use the [id=N] shown above)`,
   );
 
   return lines.join("\n");
@@ -224,7 +224,7 @@ export interface EnrichContext {
   qualityTier: string;
   slug: string;
   skillPath: string;
-  sourceEpisodes: Array<{ id: number; summary: string; createdAt: string }>;
+  sourceEpisodes: Array<{ id: string; summary: string; createdAt: string }>;
   relatedConcepts: Array<{ name: string; summary: string }>;
   reflectionRunGrade: string | null;
 }
@@ -243,13 +243,14 @@ export async function getEnrichContext(
   if (!candidate) throw new Error(`Candidate ${candidateId} not found`);
 
   // 2. Fetch source episodes
-  let sourceEpisodes: Array<{ id: number; summary: string; createdAt: string }> = [];
-  if (candidate.source_episode_ids?.length) {
+  let sourceEpisodes: Array<{ id: string; summary: string; createdAt: string }> = [];
+  const episodeIds = candidate.source_episode_ids ?? [];
+  if (episodeIds.length) {
     const { rows } = await pool.query(
-      "SELECT id, summary, created_at FROM episodes WHERE id = ANY($1) ORDER BY created_at DESC LIMIT 10",
-      [candidate.source_episode_ids],
+      `SELECT id, summary, created_at FROM episodes WHERE id = ANY($1::uuid[])`,
+      [episodeIds],
     );
-    sourceEpisodes = rows.map((r: any) => ({ id: r.id, summary: r.summary, createdAt: r.created_at }));
+    sourceEpisodes = rows.map((r: any) => ({ id: r.id, summary: r.summary?.slice(0, 300), createdAt: r.created_at }));
   }
 
   // 3. Fetch related concepts
