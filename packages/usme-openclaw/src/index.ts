@@ -138,22 +138,25 @@ interface InjectionLogEntry {
  * Errors are swallowed so logging never affects the hot path.
  */
 function writeInjectionLog(entry: InjectionLogEntry): void {
-  try {
+  // Fire-and-forget async write — never blocks the hot path
+  setImmediate(() => {
     ensureInjectionLogDir();
-    fs.appendFileSync(INJECTION_LOG_FILE, JSON.stringify(entry) + "\n", "utf8");
-  } catch {
-    // Never let logging failure affect the hot path
-  }
+    fs.appendFile(INJECTION_LOG_FILE, JSON.stringify(entry) + "\n", "utf8", () => {
+      // Errors intentionally swallowed
+    });
+  });
 }
 
 // ── Debug logger (file-based, zero deps, always writable) ───────────────────
 
 const DBG_LOG = "/tmp/usme/debug.log";
 function dbg(msg: string): void {
-  try {
-    fs.mkdirSync("/tmp/usme", { recursive: true });
-    fs.appendFileSync(DBG_LOG, `[${new Date().toISOString()}] ${msg}\n`);
-  } catch { /* never break the hot path */ }
+  setImmediate(() => {
+    try {
+      fs.mkdirSync("/tmp/usme", { recursive: true });
+      fs.appendFile(DBG_LOG, `[${new Date().toISOString()}] ${msg}\n`, "utf8", () => {});
+    } catch { /* never break the hot path */ }
+  });
 }
 
 // ── Scheduler singleton ────────────────────────────────────────────────────────

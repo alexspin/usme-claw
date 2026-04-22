@@ -70,18 +70,19 @@ export async function markTracesEpisodified(
 
 export async function insertEpisode(
   pool: pg.Pool,
-  episode: Omit<Episode, "id" | "created_at" | "access_count" | "last_accessed">,
+  episode: Omit<Episode, "id" | "created_at" | "access_count" | "last_accessed"> & { entity_ids?: string[] },
 ): Promise<string> {
   const { rows } = await pool.query(
     `INSERT INTO episodes
        (session_ids, time_bucket, summary, embedding, source_trace_ids,
-        token_count, utility_score, importance_score, metadata)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+        token_count, utility_score, importance_score, metadata, entity_ids)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
      RETURNING id`,
     [
       episode.session_ids, episode.time_bucket, episode.summary,
       vecLiteral(episode.embedding), episode.source_trace_ids, episode.token_count,
       episode.utility_score, episode.importance_score ?? 5, episode.metadata,
+      episode.entity_ids ?? [],
     ],
   );
   return rows[0].id;
@@ -271,6 +272,53 @@ export async function findSimilarTrace(
     [JSON.stringify(embedding), threshold]
   );
   return result.rows.length > 0;
+}
+
+/**
+ * Batch near-duplicate check. Returns a boolean array parallel to `embeddings`,
+ * true where a sufficiently similar trace already exists.
+ * Uses a single CTE to avoid N round-trips.
+ */
+export async function findSimilarTraces(
+  pool: pg.Pool,
+  embeddings: (number[] | null)[],
+  threshold: number
+): Promise<boolean[]> {
+  // Build query only for non-null embeddings
+  const indexed: { i: number; vec: number[] }[] = [];
+  for (let i = 0; i < embeddings.length; i++) {
+    const e = embeddings[i];
+    if (e) indexed.push({ i, vec: e });
+  }
+
+  const results = new Array<boolean>(embeddings.length).fill(false);
+  if (indexed.length === 0) return results;
+
+  // Build a VALUES clause: (index, vector_literal)
+  const valueRows = indexed.map((item, j) =>
+    `(${item.i}, $${j + 1}::vector)`
+  );
+  const params = indexed.map(item => JSON.stringify(item.vec));
+
+  const sql = `
+    WITH candidates(idx, vec) AS (
+      VALUES ${valueRows.join(', ')}
+    )
+    SELECT DISTINCT c.idx
+    FROM candidates c
+    WHERE EXISTS (
+      SELECT 1 FROM sensory_trace st
+      WHERE st.embedding IS NOT NULL
+        AND 1 - (st.embedding <=> c.vec) > ${threshold}
+      LIMIT 1
+    )
+  `;
+
+  const { rows } = await pool.query(sql, params);
+  for (const row of rows as Array<{ idx: number }>) {
+    results[row.idx] = true;
+  }
+  return results;
 }
 
 // ── Reconciliation ──────────────────────────────────────────

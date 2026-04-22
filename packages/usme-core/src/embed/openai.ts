@@ -27,21 +27,33 @@ export async function embedText(
   const cached = embeddingCache.get(text);
   if (cached) return cached;
 
-  try {
-    const client = getClient(apiKey);
-    const response = await client.embeddings.create({
-      model: EMBEDDING_MODEL,
-      input: text,
-      dimensions: EMBEDDING_DIMENSIONS,
-    });
-    const vec = response.data[0].embedding;
-    embeddingCache.set(text, vec);
-    return vec;
-  } catch (err) {
-    log.error({ err }, "OpenAI embedding failed");
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(`[usme] OpenAI embedding failed: ${msg}`);
+  const MAX_ATTEMPTS = 3;
+  const BACKOFF_MS = [500, 1000];
+
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    try {
+      const client = getClient(apiKey);
+      const response = await client.embeddings.create({
+        model: EMBEDDING_MODEL,
+        input: text,
+        dimensions: EMBEDDING_DIMENSIONS,
+      });
+      const vec = response.data[0].embedding;
+      embeddingCache.set(text, vec);
+      return vec;
+    } catch (err) {
+      lastErr = err;
+      if (attempt < MAX_ATTEMPTS - 1) {
+        const delay = BACKOFF_MS[attempt] ?? 1000;
+        log.warn({ err, attempt: attempt + 1 }, `OpenAI embedding attempt ${attempt + 1} failed, retrying in ${delay}ms`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
   }
+  log.error({ err: lastErr }, "OpenAI embedding failed after retries");
+  const msg = lastErr instanceof Error ? lastErr.message : String(lastErr);
+  throw new Error(`[usme] OpenAI embedding failed: ${msg}`);
 }
 
 /**
@@ -63,22 +75,38 @@ export async function embedBatch(
   }
 
   if (misses.length > 0) {
-    try {
-      const client = getClient(apiKey);
-      const response = await client.embeddings.create({
-        model: EMBEDDING_MODEL,
-        input: misses.map((m) => m.text),
-        dimensions: EMBEDDING_DIMENSIONS,
-      });
-      for (let i = 0; i < response.data.length; i++) {
-        const vec = response.data[i].embedding;
-        const miss = misses[i];
-        results[miss.index] = vec;
-        embeddingCache.set(miss.text, vec);
+    const MAX_ATTEMPTS = 3;
+    const BACKOFF_MS = [500, 1000];
+    let lastErr: unknown;
+    let succeeded = false;
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      try {
+        const client = getClient(apiKey);
+        const response = await client.embeddings.create({
+          model: EMBEDDING_MODEL,
+          input: misses.map((m) => m.text),
+          dimensions: EMBEDDING_DIMENSIONS,
+        });
+        for (let i = 0; i < response.data.length; i++) {
+          const vec = response.data[i].embedding;
+          const miss = misses[i];
+          results[miss.index] = vec;
+          embeddingCache.set(miss.text, vec);
+        }
+        succeeded = true;
+        break;
+      } catch (err) {
+        lastErr = err;
+        if (attempt < MAX_ATTEMPTS - 1) {
+          const delay = BACKOFF_MS[attempt] ?? 1000;
+          log.warn({ err, attempt: attempt + 1 }, `OpenAI batch embedding attempt ${attempt + 1} failed, retrying in ${delay}ms`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
       }
-    } catch (err) {
-      log.error({ err }, "OpenAI batch embedding failed");
-      const msg = err instanceof Error ? err.message : String(err);
+    }
+    if (!succeeded) {
+      log.error({ err: lastErr }, "OpenAI batch embedding failed after retries");
+      const msg = lastErr instanceof Error ? lastErr.message : String(lastErr);
       throw new Error(`[usme] OpenAI batch embedding failed: ${msg}`);
     }
   }

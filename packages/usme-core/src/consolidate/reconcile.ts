@@ -12,7 +12,7 @@ import {
   insertConcept,
   deactivateConcept,
 } from "../db/queries.js";
-import { embedText } from "../embed/index.js";
+import { embedText, parseEmbeddingSafe } from "../embed/index.js";
 import type { NightlyConfig } from "./nightly.js";
 import type { Concept } from "../schema/types.js";
 import { logger } from "../logger.js";
@@ -92,9 +92,7 @@ export async function stepReconcile(
   let nonNoopCount = 0;
 
   for (const concept of concepts) {
-    const embedding = typeof concept.embedding === "string"
-      ? JSON.parse(concept.embedding)
-      : concept.embedding;
+    const embedding = parseEmbeddingSafe(concept.embedding);
     const candidates = await findReconciliationCandidates(
       pool,
       concept.id,

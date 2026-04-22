@@ -5,6 +5,7 @@
 import type { Pool } from "pg";
 import type { MemoryTier, RetrievalCandidate, AssemblyModeProfile } from "./types.js";
 import { countTokens } from "../tokenize.js";
+import { parseEmbeddingSafe } from "../embed/index.js";
 
 const DEFAULT_TIER_TIMEOUT_MS = 80;
 const DEFAULT_TOP_K = 20;
@@ -137,7 +138,5 @@ async function queryTier(
 }
 
 function parseEmbedding(raw: unknown): number[] {
-  if (Array.isArray(raw)) return raw as number[];
-  if (typeof raw === "string") return JSON.parse(raw) as number[];
-  return [];
+  return parseEmbeddingSafe(raw) ?? [];
 }

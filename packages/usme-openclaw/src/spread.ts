@@ -5,6 +5,7 @@
 
 import type { Pool } from "pg";
 import type { RetrievalCandidate } from "@usme/core";
+import { parseEmbeddingSafe } from "@usme/core";
 
 export interface SpreadingConfig {
   maxDepth: number;       // 0 = no-op, 2 = default
@@ -45,17 +46,36 @@ export async function spreadingActivation(
   // Extract all text from candidate items
   const allText = candidates.map((c) => c.content).join(" ").toLowerCase();
 
-  // Query all entities
-  const { rows: entities } = await pool.query(
-    `SELECT id, canonical, name FROM entities WHERE canonical IS NOT NULL`,
-  );
+  // Extract word tokens from allText for SQL-side matching
+  const tokens = allText
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length > 2);
 
-  // Find which entity canonicals appear in candidate text
-  const matchedEntityIds: string[] = [];
-  for (const entity of entities as Array<{ id: string; canonical: string; name: string }>) {
-    const searchStr = (entity.canonical || entity.name).toLowerCase();
-    if (searchStr && allText.includes(searchStr)) {
-      matchedEntityIds.push(entity.id);
+  // Push entity match into SQL — exact match first
+  const { rows: exactEntities } = await pool.query(
+    `SELECT id FROM entities
+     WHERE canonical IS NOT NULL
+       AND LOWER(canonical) = ANY($1::text[])
+     LIMIT 200`,
+    [tokens],
+  );
+  const matchedEntityIds: string[] = (exactEntities as Array<{ id: string }>).map((e) => e.id);
+
+  // Fuzzy fallback if no exact matches
+  if (matchedEntityIds.length === 0) {
+    const longTokens = tokens.filter((t) => t.length > 4).slice(0, 20);
+    if (longTokens.length > 0) {
+      const patterns = longTokens.map((t) => `%${t}%`);
+      const { rows: fuzzyEntities } = await pool.query(
+        `SELECT id FROM entities
+         WHERE canonical IS NOT NULL
+           AND LOWER(canonical) ILIKE ANY($1::text[])
+         LIMIT 50`,
+        [patterns],
+      );
+      for (const e of fuzzyEntities as Array<{ id: string }>) {
+        matchedEntityIds.push(e.id);
+      }
     }
   }
 
@@ -106,13 +126,7 @@ export async function spreadingActivation(
 
   const connectedEntities = allEntityIds.size;
 
-  // Get canonical names of all matched entities for ILIKE search
-  const { rows: entityNames } = await pool.query(
-    `SELECT canonical, name FROM entities WHERE id = ANY($1::uuid[]) AND (canonical IS NOT NULL OR name IS NOT NULL)`,
-    [Array.from(allEntityIds)],
-  );
-
-  if (entityNames.length === 0) {
+  if (allEntityIds.size === 0) {
     return {
       candidates,
       metrics: {
@@ -126,21 +140,18 @@ export async function spreadingActivation(
     };
   }
 
-  // Build ILIKE patterns for episode search
-  const patterns = (entityNames as Array<{ canonical: string | null; name: string }>)
-    .map((e) => `%${(e.canonical || e.name).replace(/[%_]/g, '\\$&')}%`);
-
+  const entityIdArray = Array.from(allEntityIds);
   const existingIds = candidates.map((c) => c.id);
 
-  // Find episodes referencing those entities
+  // Find episodes referencing those entities via GIN-indexed entity_ids column
   const { rows: newEpisodes } = await pool.query(
     `SELECT e.id, e.summary AS content, e.importance_score, e.utility_score,
             e.access_count, e.created_at, e.embedding
      FROM episodes e
-     WHERE e.summary ILIKE ANY($1::text[])
+     WHERE e.entity_ids && $1::uuid[]
        AND e.id != ALL($2::uuid[])
      LIMIT $3`,
-    [patterns, existingIds.length > 0 ? existingIds : ['00000000-0000-0000-0000-000000000000'], config.maxAdditional],
+    [entityIdArray, existingIds.length > 0 ? existingIds : ['00000000-0000-0000-0000-000000000000'], config.maxAdditional],
   );
 
   // Convert to RetrievalCandidate objects
@@ -186,9 +197,5 @@ export async function spreadingActivation(
 }
 
 function parseEmbedding(raw: unknown): number[] {
-  if (Array.isArray(raw)) return raw as number[];
-  if (typeof raw === "string") {
-    try { return JSON.parse(raw) as number[]; } catch { return []; }
-  }
-  return [];
+  return parseEmbeddingSafe(raw) ?? [];
 }

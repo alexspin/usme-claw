@@ -3,7 +3,7 @@ import { z } from "zod";
 import { destr } from "destr";
 import type pg from "pg";
 import { FACT_EXTRACTION_V1 } from "./prompts/fact-extraction-v1.js";
-import { insertSensoryTrace, findSimilarTrace } from "../db/queries.js";
+import { insertSensoryTrace, findSimilarTrace, findSimilarTraces } from "../db/queries.js";
 import { embedBatch } from "../embed/index.js";
 import { logger } from "../logger.js";
 
@@ -144,21 +144,22 @@ export async function persistExtractedItems(
     }
   }
 
+  // Batch near-duplicate check — one query instead of N
+  let dupResults: boolean[] = new Array(keepItems.length).fill(false);
+  try {
+    dupResults = await findSimilarTraces(pool, embeddings, DEDUP_SIMILARITY_THRESHOLD);
+  } catch (err) {
+    log.debug({ err }, "findSimilarTraces batch check failed (continuing without dedup)");
+  }
+
   for (let i = 0; i < keepItems.length; i++) {
     const item = keepItems[i];
     const embedding = embeddings[i];
 
-    // Near-duplicate suppression: skip if a very similar trace already exists
-    if (embedding) {
-      try {
-        const isDuplicate = await findSimilarTrace(pool, embedding, DEDUP_SIMILARITY_THRESHOLD);
-        if (isDuplicate) {
-          log.info(`Skipped near-duplicate item: "${item.content.slice(0, 80)}"`);
-          continue;
-        }
-      } catch (err) {
-        log.debug({ err }, "findSimilarTrace failed (continuing without dedup)");
-      }
+    // Near-duplicate suppression
+    if (dupResults[i]) {
+      log.info(`Skipped near-duplicate item: "${item.content.slice(0, 80)}"`);
+      continue;
     }
 
     try {
