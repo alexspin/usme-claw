@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test & Type-check
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: usme
+          POSTGRES_PASSWORD: usme_test
+          POSTGRES_DB: usme_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5433:5432
+
+    env:
+      OPENCLAW_WORKSPACE_DIR: /tmp/openclaw-workspace
+      PGHOST: localhost
+      PGPORT: 5433
+      PGDATABASE: usme_test
+      PGUSER: usme
+      PGPASSWORD: usme_test
+      DATABASE_URL: postgres://usme:usme_test@localhost:5433/usme_test
+      # Provide a dummy API key so the import doesn't throw
+      OPENAI_API_KEY: sk-test-placeholder
+      ANTHROPIC_API_KEY: sk-ant-test-placeholder
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Run migrations
+        run: npm run db:migrate:test
+        continue-on-error: true   # migrations may not exist yet; tests handle setup
+
+      - name: Type-check (usme-core)
+        run: npx tsc --noEmit
+        working-directory: packages/usme-core
+
+      - name: Run tests
+        run: npm test

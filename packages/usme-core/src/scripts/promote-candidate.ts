@@ -126,7 +126,8 @@ async function main() {
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-+|-+$/g, "");
-    const skillPath = `/home/alex/ai/projects/.openclaw/workspace-rufus/skills/${skillSlug}/SKILL.md`;
+    const workspaceDir = process.env.OPENCLAW_WORKSPACE_DIR ?? "/home/alex/ai/projects/.openclaw/workspace-rufus";
+    const skillPath = `${workspaceDir}/skills/${skillSlug}/SKILL.md`;
 
     // ── Transaction: INSERT skills + UPDATE skill_candidates ──────────────
     const client = await pool.connect();

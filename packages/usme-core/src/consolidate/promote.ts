@@ -274,7 +274,8 @@ export async function getEnrichContext(
 
   // 5. Compute slug and skillPath
   const slug = candidate.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-  const skillPath = `/home/alex/ai/projects/.openclaw/workspace-rufus/skills/${slug}/SKILL.md`;
+  const workspaceDir = process.env.OPENCLAW_WORKSPACE_DIR ?? "/home/alex/ai/projects/.openclaw/workspace-rufus";
+  const skillPath = `${workspaceDir}/skills/${slug}/SKILL.md`;
 
   return {
     candidateId: candidate.id,

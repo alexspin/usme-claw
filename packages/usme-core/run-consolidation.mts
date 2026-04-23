@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import pg from "pg";
-import { runNightlyConsolidation } from "/home/alex/ai/projects/rufus-projects/usme-claw/packages/usme-core/src/consolidate/nightly.js";
+import { runNightlyConsolidation } from "./src/consolidate/nightly.js";
 
 async function main() {
   const pool = new pg.Pool({
