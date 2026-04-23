@@ -453,6 +453,48 @@ Plugin config (under `plugins.config.usme-claw`):
 
 ---
 
+## Configuration
+
+### Model Configuration
+
+Three environment variables override the model defaults in `openclaw.json`. Set them in your `.env` or export before starting the gateway:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `USME_FAST_MODEL` | `claude-haiku-4-5` | Extraction and fast tasks |
+| `USME_REASONING_MODEL` | `claude-sonnet-4-6` | Reflection and consolidation |
+| `USME_EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model |
+| `USME_EMBEDDING_DIMENSIONS` | `1536` | Embedding dimensions |
+
+If unset, the system falls back to the values in `openclaw.json` at `plugins.entries.usme-claw.config`, then to hardcoded defaults. Missing env vars log a warning at startup but do not crash the server.
+
+### Process Manager (usme-dashboard)
+
+Do not run the dashboard with bare `tsx`. Use PM2 or systemd:
+
+```bash
+# PM2 (recommended for dev/staging)
+cd usme-dashboard && pm2 start ecosystem.config.js
+
+# systemd (production Linux)
+sudo cp usme-dashboard/usme-dashboard.service /etc/systemd/system/
+sudo systemctl enable --now usme-dashboard
+```
+
+The systemd unit reads secrets from `/home/alex/ai/projects/env-secrets.sh` — update the `EnvironmentFile` path before deploying on a new machine.
+
+### OPENCLAW_WORKSPACE_DIR
+
+Required for skill promotion. Set to your OpenClaw workspace path:
+
+```bash
+export OPENCLAW_WORKSPACE_DIR=/path/to/.openclaw/workspace-<name>
+```
+
+The promote scripts will throw a clear error if this is not set.
+
+---
+
 ## Tuning
 
 | Parameter | Default | Effect |

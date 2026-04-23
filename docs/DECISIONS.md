@@ -117,3 +117,25 @@ _Distilled from design docs, session history, and the deployed codebase. Decisio
 **Rationale:** 0.7 was chosen as the threshold where Sonnet's confidence correlates with actual skill quality in testing. Below that threshold, candidates are often too project-specific, too granular, or poorly defined. The split avoids discarding potentially valuable but uncertain candidates — they surface in the dashboard for human review.
 
 **Daily delivery:** Pending skill candidates are dispatched as an agent message at 17:00 UTC for approval.
+
+---
+
+## D12 — Two-layer model configuration (2026-04-23)
+
+**Decision:** Environment variables (`USME_FAST_MODEL`, `USME_REASONING_MODEL`, `USME_EMBEDDING_MODEL`, `USME_EMBEDDING_DIMENSIONS`) take precedence over `openclaw.json` plugin config, which takes precedence over hardcoded defaults.
+
+**Rationale:** Allows deployment-time model override without code changes. Useful for testing different models or switching to newer versions without touching source.
+
+**Fallback pattern:** Missing env vars log a warning but the system continues with defaults — backward-compatible and supports gradual migration.
+
+**Source of truth:** `packages/usme-core/src/config/models.ts`
+
+---
+
+## D13 — Process manager for usme-dashboard (2026-04-23)
+
+**Decision:** PM2 `ecosystem.config.js` and a systemd unit (`usme-dashboard.service`) are provided in the usme-dashboard repo. The dashboard must not be run with bare `tsx src/server.ts` in production.
+
+**Rationale:** Bare `tsx` provides no auto-restart on crash. The dashboard needs to survive gateway restarts, nightly consolidation disruptions, and unhandled rejections without manual intervention.
+
+**Recommended:** PM2 for development/staging machines; systemd for production Linux servers. Both options provided to match operator environment.

@@ -43,6 +43,27 @@
 | P1-8: PostgreSQL session store | ✅ Complete | connect-pg-simple replaces MemoryStore |
 | P1-9: CI workflow | ✅ Complete | .github/workflows/ci.yml added to usme-dashboard and usme-claw. **Process manager (PM2/systemd) deferred.** |
 
+### Phase 2 code quality remediation (in progress as of 2026-04-23)
+
+| Item | Status | Notes |
+|---|---|---|
+| P2-3: Helmet CSP + session cookie hardening | ✅ Complete | Security headers, SameSite=strict, HttpOnly, Secure flags |
+| P2-2: Model config unification | ✅ Complete | Env var precedence over openclaw.json over hardcoded defaults; packages/usme-core/src/config/models.ts |
+| P2-7: Slug utility extraction | ✅ Complete | Extracted to shared utility |
+| P2-8: Silent error fixes | ✅ Complete | Errors now logged and surfaced |
+| P2-10: Zod validation (embed/index.ts) | ✅ Complete | Input validation added |
+| P2-1: PM2/systemd process manager | ✅ Complete | ecosystem.config.js + usme-dashboard.service added to usme-dashboard repo |
+| P2-4: index.ts decomposition | 🔲 Outstanding | God file still >1000 lines |
+| P2-5: reflect.ts split | 🔲 Outstanding | Reflection logic and HTTP routes tangled |
+| P2-11: CI updates | 🔲 Outstanding | CI workflow needs update after Phase 2 changes |
+
+### Live system stats (as of 2026-04-23)
+
+- **PostgreSQL:** 2909 sensory traces, 222 episodes, 212 concepts, 983 entities, 137 skill candidates
+- **Dashboard:** Port 3456, behind NGINX at collective7.spinelli5.com/usme/
+- **Process manager:** PM2 `ecosystem.config.js` + systemd unit (`usme-dashboard.service`) in usme-dashboard repo
+- **Model config:** `USME_FAST_MODEL`, `USME_REASONING_MODEL`, `USME_EMBEDDING_MODEL` env vars override openclaw.json plugin config
+
 ---
 
 ## Known issues / incomplete
@@ -87,7 +108,7 @@ Candidates from reflect runs before commit f17b306 have `source_episode_ids = nu
 ### Outstanding Phase 1 items (deferred)
 
 - **P1-1 git history rewrite** — Private key in commit 91ed5a2 still in git history. Requires explicit owner approval to proceed.
-- **P1-9 process manager** — Server still runs via tsx. PM2 or systemd setup deferred.
+- **P1-9 process manager** — ✅ Complete. ecosystem.config.js + usme-dashboard.service added to usme-dashboard repo.
 - **Hardcoded paths in usme-core** — `promote.ts` and `promote-candidate.ts` still have `/home/alex/` paths. Only usme-dashboard was remediated in P1-4.
 - **Port 3747** — Old rufus-plugin standalone dashboard (PID 1761055) still running. Decommission pending decision.
 - **Parent workspace submodule pointer** — Ruflo-Claw-Swarm has uncommitted changes; usme submodule pointer not yet committed.
@@ -119,3 +140,4 @@ Candidates from reflect runs before commit f17b306 have `source_episode_ids = nu
 | 2026-04-09 | SHIP | Reflection service, spreading activation, dashboard, migrations 010–013 |
 | 2026-04-10 | SHIP | Migration 014, reflect/promote pipeline, script-based promotion, unified dashboard, HEARTBEAT filter, before_message_write hook |
 | 2026-04-23 | SHIP | Phase 1 security remediation complete (P1-1 through P1-9 shipped) |
+| 2026-04-23 | SHIP | Phase 2 partial: model config unification, Helmet CSP, slug utility, silent error fixes, Zod validation, PM2/systemd config |
