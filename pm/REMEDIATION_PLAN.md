@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-20
 **Based on:** AUDIT_REPORT.md + SECURITY_AND_SCALE.md
-**Status:** Draft — Awaiting Owner Review
+**Status:** Phase 1 Complete — Phase 2 Pending
 
 ---
 
@@ -34,144 +34,166 @@ These are blocking issues. The system cannot safely be handed to another develop
 **Issue:** Plaintext Ed25519 private key and bearer token committed to git history.
 
 **Steps:**
-1. Rotate the Ed25519 key pair at the gateway.
-2. Issue a new bearer token.
-3. Remove both files from the repo and add to `.gitignore`.
-4. Rewrite git history to purge the files (or rotate again post-history-rewrite if you accept the key as compromised).
+1. [x] Rotate the Ed25519 key pair at the gateway. *(2026-04-23 — old device b24cd395 removed, new device fe829ba2 registered)*
+2. [x] Issue a new bearer token. *(2026-04-23)*
+3. [x] Remove both files from the repo and add to `.gitignore`. *(2026-04-23)*
+4. [ ] Rewrite git history to purge the files — **DEFERRED. Requires explicit owner approval. Private key in commit 91ed5a2 still present in history.**
 5. Document a new secrets injection pattern in the Dockerfile (e.g., `--secret` mount).
 
 **Effort:** ~2 hours + key rotation coordination
 
 ---
 
-### P1-2: Remove Hardcoded Fallback Credentials
+### P1-2: Remove Hardcoded Fallback Credentials ✅ Complete (2026-04-23)
 
 **Severity:** CRITICAL
 **File:** `usme-dashboard/src/server.ts:41–45`
 **Issue:** Plaintext fallback users `alex:claw-alex-26`, `adam:claw-adam-26` activated silently when `DASHBOARD_USERS` is absent.
 
 **Steps:**
-1. Delete the hardcoded fallback user block entirely.
-2. Add startup crash: `if (!process.env.DASHBOARD_USERS) throw new Error('DASHBOARD_USERS must be set')`.
-3. Document `DASHBOARD_USERS` format in `.env.example`.
+1. [x] Delete the hardcoded fallback user block entirely.
+2. [x] Add startup crash: `if (!process.env.DASHBOARD_USERS) throw new Error('DASHBOARD_USERS must be set')`.
+3. [x] Document `DASHBOARD_USERS` format in `.env.example`.
 
 **Effort:** ~1 hour
 
 ---
 
-### P1-3: Replace Plaintext Password Comparison with bcrypt
+### P1-3: Replace Plaintext Password Comparison with bcrypt ✅ Complete (2026-04-23)
 
 **Severity:** CRITICAL
 **File:** `usme-dashboard/src/server.ts:316`
 **Issue:** `password === storedPassword` — no hashing, no rate limiting.
 
 **Steps:**
-1. Add `bcrypt` to `usme-dashboard` package.json.
-2. Replace equality check with `await bcrypt.compare(inputPassword, storedHash)`.
-3. Update `DASHBOARD_USERS` format to store bcrypt hashes, not plaintext.
-4. Add `express-rate-limit` to the `/login` route (10 attempts / 15 min / IP).
+1. [x] Add `bcrypt` to `usme-dashboard` package.json.
+2. [x] Replace equality check with `await bcrypt.compare(inputPassword, storedHash)`.
+3. [x] Update `DASHBOARD_USERS` format to store bcrypt hashes, not plaintext. (12 rounds)
+4. [x] Add `express-rate-limit` to the `/login` route (10 attempts / 15 min / IP).
 
 **Libraries to add:** `bcrypt`, `@types/bcrypt`, `express-rate-limit`
 **Effort:** ~2 hours
 
 ---
 
-### P1-4: Remove All Hardcoded `/home/alex/` Paths
+### P1-4: Remove All Hardcoded `/home/alex/` Paths — Partial (2026-04-23)
 
 **Severity:** CRITICAL
 **Issue:** Multiple production files embed absolute paths to the developer's home directory. The system is unrunnable on any other machine.
 
 **Specific changes:**
 
-| File | Current Value | Replace With |
+| File | Status | Notes |
 |---|---|---|
-| `usme-dashboard/src/server.ts:21–22` | `/home/alex/ai/projects/...` | `process.env.SWARM_SERVER_DIR` (crash if absent) |
-| `packages/usme-core/src/consolidate/promote.ts:277` | `/home/alex/ai/projects/.openclaw/workspace-rufus/skills/` | `process.env.OPENCLAW_WORKSPACE_DIR + '/skills/'` |
-| `packages/usme-core/src/scripts/promote-candidate.ts:129` | Same | Same env var |
-| `packages/usme-core/run-consolidation.mts:3` | Absolute import | Relative import or env var |
-| `packages/usme-openclaw/package.json` build script | `../../../../.openclaw/extensions/usme-claw/` | `OPENCLAW_EXTENSIONS_DIR` env var or computed relative path |
+| `usme-dashboard/src/server.ts:21–22` | ✅ Done | SWARM_SERVER_DIR / SWARM_UI_DIR env vars with warn-on-missing fallback |
+| `packages/usme-core/src/consolidate/promote.ts:277` | ⏳ Pending | Still has `/home/alex/` path — Phase 1 only covered usme-dashboard |
+| `packages/usme-core/src/scripts/promote-candidate.ts:129` | ⏳ Pending | Same |
+| `packages/usme-core/run-consolidation.mts:3` | ⏳ Pending | |
+| `packages/usme-openclaw/package.json` build script | ⏳ Pending | |
 
-**Effort:** ~3 hours
+**Effort:** ~3 hours (remaining)
 
 ---
 
-### P1-5: Add Startup Environment Validation
+### P1-5: Add Startup Environment Validation ✅ Complete (2026-04-23)
 
 **Severity:** HIGH
 **Issue:** Missing env vars cause silent failures or fall back to insecure defaults.
 
-**Required variables to validate (crash loudly if missing or insecure):**
-- `DATABASE_URL` — no fallback with embedded credentials
-- `SESSION_SECRET` — must not equal the known default string
-- `DASHBOARD_USERS` — must be present and parseable
-- `OPENAI_API_KEY` — must be present
-- `OPENCLAW_WORKSPACE_DIR` — must be a valid directory
-- `SWARM_SERVER_DIR` / `SWARM_UI_DIR` — must be valid directories
+**Implemented in `usme-dashboard/src/config/validate-env.ts`:**
+- [x] `SESSION_SECRET` — validates presence, length ≥ 32, rejects known insecure default
+- [x] `PORT` — validates numeric range
+- [x] `PGPASSWORD` — warns if using dev default (`usme_dev`) in a non-dev context
 
-**Implementation:** Add an `src/config/validate-env.ts` module to both `usme-core` and `usme-dashboard`. Use Zod (already a dependency in `usme-core`) or `envalid`.
+**Note:** Full validation of `DATABASE_URL`, `OPENAI_API_KEY`, `OPENCLAW_WORKSPACE_DIR` was not added in Phase 1 — those remain for Phase 2 or usme-core module.
 
 **Effort:** ~3 hours
 
 ---
 
-### P1-6: Add .env.example Files to All Repos
+### P1-6: Add .env.example Files to All Repos ✅ Complete (2026-04-23)
 
 **Severity:** HIGH
 **Issue:** No documentation of required environment variables. New developers cannot set up the system without reading all source files.
 
-**Action:** Add `.env.example` to `usme-claw/`, `usme-dashboard/`, and `rufus-plugin/` listing all env vars with descriptions and safe example values.
+**Action:** [x] Added `.env.example` to `usme-dashboard/` (9 vars) and `usme-claw/` (7 vars). `rufus-plugin/` not yet covered.
 
 **Effort:** ~1 hour
 
 ---
 
-### P1-7: Add README to usme-dashboard
+### P1-7: Add README to usme-dashboard ✅ Complete (2026-04-23)
 
 **Severity:** HIGH
 **Issue:** Zero documentation for the dashboard — the only entry point is 883 lines of `server.ts`.
 
-**Cover:**
-- Purpose and architecture overview
-- Prerequisites (Node version, PostgreSQL, env vars)
-- How to run (development and production)
-- Available routes and their purpose
-- Known limitations (single-user, in-memory sessions before P1-8)
+**Delivered:**
+- [x] Purpose and architecture overview
+- [x] Prerequisites (Node version, PostgreSQL, env vars)
+- [x] How to run (development and production)
+- [x] Available routes and their purpose
+- [x] Known limitations
 
 **Effort:** ~2 hours
 
 ---
 
-### P1-8: Replace In-Memory Session Store
+### P1-8: Replace In-Memory Session Store ✅ Complete (2026-04-23)
 
 **Severity:** HIGH
 **File:** `usme-dashboard/src/server.ts`
 **Issue:** `MemoryStore` — all sessions lost on every restart.
 
-**Action:** Replace with `connect-pg-simple` (PostgreSQL-backed sessions using the existing `pg` connection pool). Run the session table migration as part of the existing `node-pg-migrate` setup.
+**Action:** [x] Replaced with `connect-pg-simple` (PostgreSQL-backed sessions using the existing `pg` connection pool).
 
 **Library:** `connect-pg-simple`
 **Effort:** ~1 hour
 
 ---
 
-### P1-9: Add Process Manager for usme-dashboard
+### P1-9: Add Process Manager for usme-dashboard — Partial (2026-04-23)
 
 **Severity:** HIGH
 **Issue:** Dashboard started with raw `tsx src/server.ts` — crashes are not recovered automatically.
 
-**Action:** Add `ecosystem.config.cjs` for PM2 with:
-- Restart policy (`max_restarts: 10`, `restart_delay: 5000`)
-- Log rotation
-- Environment variable injection
-- Watch mode disabled in production
+**Steps:**
+- [x] CI workflow: `.github/workflows/ci.yml` added to usme-dashboard and usme-claw (build, type-check, test on PR/push).
+- [ ] Process manager (PM2 or systemd): **DEFERRED.** Server still runs via tsx (PID 1827925, restarted 2026-04-23 05:05 UTC).
 
-**Or:** Add a `systemd` service unit file for VPS/server deployments.
-
-**Effort:** ~1 hour
+**Effort:** ~1 hour (remaining for process manager)
 
 ---
 
 **Phase 1 Total: ~17 hours (~2.5 dev days)**
+
+---
+
+## Phase 1 Execution Notes
+
+### .env quoting bug with bcrypt hashes
+
+`DASHBOARD_USERS` contains bcrypt hashes with `$2b$` prefixes. When `.env` is loaded via `env $(cat .env | xargs) npm start` or via `source .env` without quoting, the shell expands `$2b$12$...` as variable references and mangles the value.
+
+**Fix:** Single-quote the `DASHBOARD_USERS` value in `.env`:
+
+```
+DASHBOARD_USERS='[{"userId":"alex","password":"$2b$12$...","projectsDir":"/path"}]'
+```
+
+### Correct startup pattern for usme-dashboard
+
+Do **not** use `env $(cat .env | xargs) npm start` — xargs will mangle JSON containing `$` characters.
+
+Use `set -a` with `source`:
+
+```bash
+set -a
+source /path/to/usme-dashboard/.env
+set +a
+npx tsx src/server.ts >> dashboard.log 2>&1 &
+```
+
+`set -a` causes all sourced variables to be exported automatically. Single-quoted values in `.env` prevent shell expansion of `$` characters.
 
 ---
 
@@ -417,21 +439,21 @@ These items improve long-term maintainability and scaling readiness. Not blockin
 ## Handoff Checklist
 
 ### Security Gate
-- [ ] P1-1: Key material rotated and removed from repo history
-- [ ] P1-2: Fallback credentials removed; startup crashes on missing `DASHBOARD_USERS`
-- [ ] P1-3: bcrypt password hashing in place; rate limiting on `/login`
-- [ ] P1-5: Startup validation crashes on insecure env vars
+- [x] P1-1: Key material rotated and removed from repo *(history rewrite still pending)*
+- [x] P1-2: Fallback credentials removed; startup crashes on missing `DASHBOARD_USERS`
+- [x] P1-3: bcrypt password hashing in place; rate limiting on `/login`
+- [x] P1-5: Startup validation crashes on insecure env vars
 
 ### Portability Gate
-- [ ] P1-4: No `/home/alex/` paths in any source file
-- [ ] P1-6: `.env.example` files in all repos
-- [ ] P1-7: README in `usme-dashboard`
+- [~] P1-4: No `/home/alex/` paths in any source file *(usme-dashboard done; usme-core pending)*
+- [x] P1-6: `.env.example` files in all repos *(usme-dashboard + usme-claw done; rufus-plugin pending)*
+- [x] P1-7: README in `usme-dashboard`
 - [ ] System verified to start cleanly on a fresh machine using only the README
 
 ### Operational Gate
-- [ ] P1-8: Persistent session store (connect-pg-simple)
-- [ ] P1-9: Process manager configured (PM2 or systemd)
-- [ ] P2-11: CI pipeline running on PRs
+- [x] P1-8: Persistent session store (connect-pg-simple)
+- [ ] P1-9: Process manager configured (PM2 or systemd) *(deferred)*
+- [x] P2-11: CI pipeline running on PRs
 
 ### Code Quality Gate (Recommended)
 - [ ] P2-4: `server.ts` decomposed (or at minimum fully documented)

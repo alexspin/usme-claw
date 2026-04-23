@@ -1,3 +1,72 @@
+# Changes: Phase 1 Security Remediation (2026-04-23)
+
+## Phase 1 security hardening — usme-dashboard
+
+**Commits:** usme-claw 69ce0b9, usme-dashboard 179d8dc
+
+### P1-1: Ed25519 key rotation
+
+Old device (deviceId b24cd395) removed from gateway paired.json. New device (fe829ba2) registered with fresh Ed25519 key pair. `baked-device.json` and `baked-device-auth.json` added to `.gitignore`. **Git history rewrite deferred — the old key commit (91ed5a2) is still accessible in history but the key is now cryptographically irrelevant (device revoked).**
+
+### P1-2: Hardcoded fallback credentials removed
+
+**File:** `usme-dashboard/src/server.ts`
+
+Fallback users `alex:claw-alex-26` and `adam:claw-adam-26` deleted from source. Server now crashes fatally at startup if `DASHBOARD_USERS` env var is missing.
+
+### P1-3: bcrypt + express-rate-limit
+
+**File:** `usme-dashboard/src/server.ts`
+
+Replaced plaintext `password === storedPassword` comparison with `await bcrypt.compare()` (12 rounds). Added `express-rate-limit` middleware on `POST /login`: 10 attempts per IP per 15 minutes.
+
+### P1-4: Hardcoded /home/alex/ paths → env vars (usme-dashboard)
+
+`SWARM_SERVER_DIR` and `SWARM_UI_DIR` promoted to environment variables. Missing vars trigger a startup warning but fall back to the previous hardcoded defaults (backward-compatible). `usme-core/promote.ts` and `promote-candidate.ts` still have hardcoded paths — deferred.
+
+### P1-5: Startup environment validation
+
+**File:** `usme-dashboard/src/config/validate-env.ts` (new)
+
+Checks `SESSION_SECRET` (presence, length ≥32 chars, rejects insecure default value), `PORT` range (1–65535), and `PGPASSWORD` (warns if set to dev default in production). Fatal crash on insecure required vars.
+
+### P1-6: .env.example files
+
+`.env.example` created for both usme-dashboard (9 vars) and usme-claw (7 vars). Includes bcrypt hash generation instructions.
+
+### P1-7: usme-dashboard README
+
+`usme-dashboard/README.md` written from scratch: architecture diagram, auth flow, env var table, routes table, running instructions, known limitations.
+
+### P1-8: PostgreSQL session store
+
+`connect-pg-simple` replaces the in-memory `MemoryStore` for `express-session`. Sessions survive process restarts.
+
+### P1-9: CI workflow
+
+`.github/workflows/ci.yml` added to both usme-dashboard and usme-claw: TypeScript type-check, build verification, test runner. **Process manager (PM2/systemd) deferred.**
+
+---
+
+## .env quoting fix for bcrypt hashes
+
+**Context:** `DASHBOARD_USERS` JSON values containing `$2b$12$...` bcrypt prefix were being mangled by shell variable expansion when sourced via `env $(cat .env | xargs)`. The `$2b` and `$12` were expanded as empty shell variables, corrupting the hash.
+
+**Fix:** Single-quote the `DASHBOARD_USERS` value in `.env`. Use `set -a && source .env && set +a` for loading env files, never `env $(cat .env | xargs)`.
+
+---
+
+## Six performance fixes (2026-04-22, commit b47da63)
+
+1. **SQL entity matching** — entity retrieval query rewritten from JS-side filtering to server-side SQL predicates
+2. **GIN-indexed entity_ids** — GIN index added on `entity_ids` array column for fast set-membership lookups
+3. **Batch CTE dedup** — retrieval deduplication moved from N+1 JS loops to a single batch CTE
+4. **Async log writes** — injection log writes decoupled from hot path; no longer block turn completion
+5. **Embedding retry logic** — `p-retry`-style retry added to `embedText()` for transient OpenAI API failures
+6. **Safe embedding parse** — `JSON.parse` on embedding fields wrapped with error guard; malformed rows no longer crash retrieval
+
+---
+
 # Changes: Context Accumulation Fix + HEARTBEAT Filter (2026-04-10)
 
 ## Fix 1 — HEARTBEAT noise filter in critic.ts (HIGH)

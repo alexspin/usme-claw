@@ -60,7 +60,7 @@ The consolidation pipeline (Claude Sonnet) groups related sensory traces into ep
 - `access_count`: incremented on each retrieval hit; feeds utility write-back
 - `exclude_from_reflection`: privacy flag
 
-Episodes are the primary memory unit for mid-term knowledge. The corpus currently holds ~160 episodes.
+Episodes are the primary memory unit for mid-term knowledge. The corpus currently holds ~222 episodes.
 
 ---
 
@@ -77,7 +77,7 @@ Concepts are promoted from episodes when the consolidation pipeline determines a
 - `tags`: used for filtering and categorization
 - `exclude_from_reflection`: privacy flag
 
-Concepts use HNSW indexes for fast ANN retrieval. The corpus currently holds ~34 active concepts.
+Concepts use HNSW indexes for fast ANN retrieval. The corpus currently holds ~212 active concepts.
 
 ---
 
@@ -98,7 +98,7 @@ Entities are named things the system knows about: people, projects, tools, organ
 
 Entities power **spreading activation**: after initial ANN retrieval, the system walks the entity graph up to N hops to pull in adjacent context that shares conceptual neighbors. Default depth is 2 (configurable via `spreading.maxDepth`; set to 0 to disable).
 
-The corpus currently holds ~298 entities with sparse relationship coverage (0–1 edges each). The reflection service adds relationship updates on each run.
+The corpus currently holds ~983 entities with sparse relationship coverage (0–1 edges each). The reflection service adds relationship updates on each run.
 
 ---
 
@@ -117,7 +117,7 @@ Skills are distilled from episodes when the system identifies a recurring, teach
 - `confidence`: reflection service confidence score (gate: >= 0.7)
 - `reflection_run_id`: which reflection run produced this candidate
 
-Skills are surfaced via two paths — see [Skill Creation](#skill-creation). There are currently 13 candidate skills pending (confidence 0.81–0.97) and 1 active skill promoted via the script-based workflow.
+Skills are surfaced via two paths — see [Skill Creation](#skill-creation). There are currently 137 candidate skills pending (confidence 0.81–0.97) and 1 active skill promoted via the script-based workflow.
 
 ---
 
@@ -255,7 +255,7 @@ Resolution options: (A) backfill scores via Haiku API calls (~$0.01 each), (B) b
 
 Sonnet reviews the corpus and drafts skills based on its own judgment. No `importance_score` dependency. Confidence >= 0.7 → written directly to `skills` table as `candidate`. Below 0.7 → `skill_candidates` table for manual approval.
 
-**Status: working.** 13 candidates pending as of 2026-04-10 (confidence 0.81–0.97). Top candidates:
+**Status: working.** 137 candidates pending as of 2026-04-23 (confidence 0.81–0.97; last reflection run 2026-04-23 04:01 UTC). Top candidates:
 - Raise LLM Output Token Ceiling (0.97)
 - Fix PostgreSQL Transaction Poisoning with Savepoints (0.95)
 - Normalize LLM Array Fields Before Schema Validation (0.93)
@@ -283,7 +283,7 @@ npx tsx packages/usme-core/src/scripts/dismiss-candidate.ts <id>
 
 ## Dashboard
 
-Live at **https://collective7.spinelli5.com/usme/** (port 3456).
+Live at **https://collective7.spinelli5.com/usme/** (port 3456). Phase 1 security hardening is active: bcrypt authentication (12 rounds), express-rate-limit on /login (10 attempts / 15 min), and PostgreSQL-backed session store via connect-pg-simple.
 
 Six panels:
 
@@ -382,6 +382,38 @@ Default connection: `postgresql://usme:usme_dev@localhost:5432/usme`
 npm install
 cd packages/usme-openclaw && npm run build
 ```
+
+### Starting usme-dashboard
+
+Use `set -a` with `source` to load the `.env` file. Do **not** use `env $(cat .env | xargs) npm start` — xargs mangles JSON values that contain `$` characters (including bcrypt hashes).
+
+```bash
+set -a
+source /path/to/usme-dashboard/.env
+set +a
+npx tsx src/server.ts >> dashboard.log 2>&1 &
+```
+
+**Important:** Single-quote the `DASHBOARD_USERS` value in `.env` to prevent shell expansion of the `$2b$` bcrypt prefix:
+
+```
+DASHBOARD_USERS='[{"userId":"alex","password":"$2b$12$...","projectsDir":"/path"}]'
+```
+
+---
+
+## Security
+
+Phase 1 security hardening (shipped 2026-04-23):
+
+- **bcrypt authentication** — `DASHBOARD_USERS` passwords must be bcrypt hashes (12 rounds). Plaintext passwords are rejected. Server crashes at startup if `DASHBOARD_USERS` is missing.
+- **Rate limiting** — express-rate-limit on `/login`: 10 attempts per IP per 15 minutes.
+- **PostgreSQL session store** — connect-pg-simple replaces the in-memory MemoryStore. Sessions survive restarts.
+- **Startup env validation** — `src/config/validate-env.ts` validates `SESSION_SECRET` (presence, length ≥ 32, rejects known insecure default) and `PORT` range.
+- **Ed25519 key rotation** — Device keys rotated; old device b24cd395 removed, new device fe829ba2 registered. Keys gitignored.
+- **No hardcoded credentials** — Fallback users removed from usme-dashboard. Path env vars added (`SWARM_SERVER_DIR`, `SWARM_UI_DIR`).
+
+**Still outstanding:** Git history rewrite (private key in commit 91ed5a2), hardcoded paths in `usme-core/promote.ts` and `promote-candidate.ts`, process manager (server runs via tsx).
 
 ---
 
