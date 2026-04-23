@@ -121,7 +121,10 @@ async function main() {
     const candidate = candidates[0];
 
     const skillSlug = toSlug(candidate.name);
-    const workspaceDir = process.env.OPENCLAW_WORKSPACE_DIR ?? "/home/alex/ai/projects/.openclaw/workspace-rufus";
+    const workspaceDir = process.env.OPENCLAW_WORKSPACE_DIR;
+    if (!workspaceDir) {
+      throw new Error('OPENCLAW_WORKSPACE_DIR environment variable is required but not set. Set it to your OpenClaw workspace path (e.g. /path/to/.openclaw/workspace-rufus).');
+    }
     const skillPath = `${workspaceDir}/skills/${skillSlug}/SKILL.md`;
 
     // ── Transaction: INSERT skills + UPDATE skill_candidates ──────────────

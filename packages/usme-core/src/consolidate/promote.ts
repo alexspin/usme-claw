@@ -275,7 +275,10 @@ export async function getEnrichContext(
 
   // 5. Compute slug and skillPath
   const slug = toSlug(candidate.name);
-  const workspaceDir = process.env.OPENCLAW_WORKSPACE_DIR ?? "/home/alex/ai/projects/.openclaw/workspace-rufus";
+  const workspaceDir = process.env.OPENCLAW_WORKSPACE_DIR;
+  if (!workspaceDir) {
+    throw new Error('OPENCLAW_WORKSPACE_DIR environment variable is required but not set. Set it to your OpenClaw workspace path (e.g. /path/to/.openclaw/workspace-rufus).');
+  }
   const skillPath = `${workspaceDir}/skills/${slug}/SKILL.md`;
 
   return {

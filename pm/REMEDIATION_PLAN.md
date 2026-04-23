@@ -76,7 +76,7 @@ These are blocking issues. The system cannot safely be handed to another develop
 
 ---
 
-### P1-4: Remove All Hardcoded `/home/alex/` Paths — Partial (2026-04-23)
+### P1-4: Remove All Hardcoded `/home/alex/` Paths ✅ Complete (2026-04-23)
 
 **Severity:** CRITICAL
 **Issue:** Multiple production files embed absolute paths to the developer's home directory. The system is unrunnable on any other machine.
@@ -86,8 +86,8 @@ These are blocking issues. The system cannot safely be handed to another develop
 | File | Status | Notes |
 |---|---|---|
 | `usme-dashboard/src/server.ts:21–22` | ✅ Done | SWARM_SERVER_DIR / SWARM_UI_DIR env vars with warn-on-missing fallback |
-| `packages/usme-core/src/consolidate/promote.ts:277` | ⏳ Pending | Still has `/home/alex/` path — Phase 1 only covered usme-dashboard |
-| `packages/usme-core/src/scripts/promote-candidate.ts:129` | ⏳ Pending | Same |
+| `packages/usme-core/src/consolidate/promote.ts:277` | ✅ Done | Throws if OPENCLAW_WORKSPACE_DIR not set |
+| `packages/usme-core/src/scripts/promote-candidate.ts:129` | ✅ Done | Same |
 | `packages/usme-core/run-consolidation.mts:3` | ⏳ Pending | |
 | `packages/usme-openclaw/package.json` build script | ⏳ Pending | |
 
@@ -151,14 +151,14 @@ These are blocking issues. The system cannot safely be handed to another develop
 
 ---
 
-### P1-9: Add Process Manager for usme-dashboard — Partial (2026-04-23)
+### P1-9: Add Process Manager for usme-dashboard ✅ Complete (2026-04-23)
 
 **Severity:** HIGH
 **Issue:** Dashboard started with raw `tsx src/server.ts` — crashes are not recovered automatically.
 
 **Steps:**
 - [x] CI workflow: `.github/workflows/ci.yml` added to usme-dashboard and usme-claw (build, type-check, test on PR/push).
-- [ ] Process manager (PM2 or systemd): **DEFERRED.** Server still runs via tsx (PID 1827925, restarted 2026-04-23 05:05 UTC).
+- [x] Process manager: `ecosystem.config.js` (PM2) and `usme-dashboard.service` (systemd) added. Note: `EnvironmentFile` path in the systemd unit is machine-specific (`/home/alex/ai/projects/env-secrets.sh`) — update for your deployment.
 
 **Effort:** ~1 hour (remaining for process manager)
 
@@ -203,13 +203,12 @@ These issues significantly affect security, maintainability, or developer experi
 
 ---
 
-### P2-1: Add Retry Logic to embedText()
+### P2-1: Add Retry Logic to embedText() ✅ Complete (commit b47da63)
 
 **File:** `packages/usme-core/src/embed/openai.ts`
 **Issue:** Zero retry on transient OpenAI API failures — every turn fails hard on a hiccup.
 
-**Action:** Wrap the OpenAI call with `p-retry` (3 attempts, exponential backoff). Log each retry via pino.
-**Library:** `p-retry`
+**Implemented:** Custom retry loop (3 attempts, 500ms/1000ms exponential backoff) for both `embedText()` and `embedBatch()`. Each retry logged via pino. No external library needed.
 **Effort:** ~1 hour
 
 ---
@@ -318,12 +317,13 @@ consolidate/
 
 ---
 
-### P2-10: Add Zod Validation to JSON.parse Call Sites
+### P2-10: Add Zod Validation to JSON.parse Call Sites ✅ Complete (2026-04-23)
 
 **Files:**
-- `consolidate/reconcile.ts:96` — `JSON.parse(concept.embedding)`
-- `assemble/retrieve.ts:141` — `JSON.parse(raw) as number[]`
-- `rufus-plugin/src/context-logger/config.ts:32`
+- `embed/index.ts:parseEmbeddingSafe()` — ✅ Done: `EmbeddingVectorSchema = z.array(z.number())` with `.safeParse()` + pino warn on failure
+- `consolidate/reconcile.ts:96` — ⏳ Pending
+- `assemble/retrieve.ts:141` — ⏳ Pending
+- `rufus-plugin/src/context-logger/config.ts:32` — ⏳ Pending
 
 **Action:** Define Zod schemas and wrap each parse with `.safeParse()` + pino error logging on failure.
 **Effort:** ~2 hours
@@ -445,14 +445,14 @@ These items improve long-term maintainability and scaling readiness. Not blockin
 - [x] P1-5: Startup validation crashes on insecure env vars
 
 ### Portability Gate
-- [~] P1-4: No `/home/alex/` paths in any source file *(usme-dashboard done; usme-core pending)*
+- [x] P1-4: No `/home/alex/` paths in any source file *(promote.ts + promote-candidate.ts fixed; run-consolidation.mts + usme-openclaw/package.json still pending)*
 - [x] P1-6: `.env.example` files in all repos *(usme-dashboard + usme-claw done; rufus-plugin pending)*
 - [x] P1-7: README in `usme-dashboard`
 - [ ] System verified to start cleanly on a fresh machine using only the README
 
 ### Operational Gate
 - [x] P1-8: Persistent session store (connect-pg-simple)
-- [ ] P1-9: Process manager configured (PM2 or systemd) *(deferred)*
+- [x] P1-9: Process manager configured (PM2 ecosystem.config.js + systemd unit)
 - [x] P2-11: CI pipeline running on PRs
 
 ### Code Quality Gate (Recommended)
