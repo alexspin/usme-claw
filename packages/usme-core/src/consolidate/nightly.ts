@@ -25,6 +25,7 @@ import { embedText } from "../embed/index.js";
 import type { SensoryTrace } from "../schema/types.js";
 import { logger } from "../logger.js";
 import { countTokens } from "../tokenize.js";
+import { DEFAULT_REASONING_MODEL, DEFAULT_FAST_MODEL } from "../config/models.js";
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -144,7 +145,7 @@ export async function stepEpisodify(
         .join("\n");
 
       const response = await client.messages.create({
-        model: config.sonnetModel ?? "claude-sonnet-4-5",
+        model: config.sonnetModel ?? DEFAULT_REASONING_MODEL,
         max_tokens: 1024,
         messages: [
           {
@@ -164,7 +165,7 @@ export async function stepEpisodify(
       try {
         const importanceStart = Date.now();
         const importanceResponse = await client.messages.create({
-          model: "claude-haiku-4-5",
+          model: DEFAULT_FAST_MODEL,
           max_tokens: 256,
           tools: [{
             name: "assign_importance",
@@ -264,7 +265,7 @@ export async function stepPromote(
     .join("\n\n");
 
   const response = await client.messages.create({
-    model: config.sonnetModel ?? "claude-sonnet-4-5",
+    model: config.sonnetModel ?? DEFAULT_REASONING_MODEL,
     max_tokens: 8192,
     tools: [{
       name: "promote_concepts",
@@ -388,7 +389,7 @@ export async function stepContradictions(
 
   for (const pair of candidates) {
     const response = await client.messages.create({
-      model: config.sonnetModel ?? "claude-sonnet-4-5",
+      model: config.sonnetModel ?? DEFAULT_REASONING_MODEL,
       max_tokens: 1024,
       tools: [{
         name: "resolve_contradiction",

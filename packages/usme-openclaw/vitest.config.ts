@@ -10,6 +10,7 @@ export default defineConfig({
     alias: {
       '@usme/core/assemble/types.js': path.resolve(__dirname, '../usme-core/src/assemble/types.ts'),
       '@usme/core/assemble/index.js': path.resolve(__dirname, '../usme-core/src/assemble/index.ts'),
+      '@usme/core/config/models': path.resolve(__dirname, '../usme-core/src/config/models.ts'),
       '@usme/core': path.resolve(__dirname, '../usme-core/src/index.ts'),
     },
   },

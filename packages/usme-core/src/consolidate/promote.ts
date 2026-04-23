@@ -9,6 +9,7 @@
 import type pg from "pg";
 import { getPool } from "../db/pool.js";
 import { logger } from "../logger.js";
+import { toSlug } from "../utils/slug.js";
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -273,7 +274,7 @@ export async function getEnrichContext(
   }
 
   // 5. Compute slug and skillPath
-  const slug = candidate.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  const slug = toSlug(candidate.name);
   const workspaceDir = process.env.OPENCLAW_WORKSPACE_DIR ?? "/home/alex/ai/projects/.openclaw/workspace-rufus";
   const skillPath = `${workspaceDir}/skills/${slug}/SKILL.md`;
 

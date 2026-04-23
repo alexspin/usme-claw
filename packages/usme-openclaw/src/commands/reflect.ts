@@ -5,6 +5,7 @@
 
 import { runReflection } from "@usme/core";
 import { getPool } from "@usme/core";
+import { DEFAULT_FAST_MODEL, DEFAULT_REASONING_MODEL } from "@usme/core/config/models";
 
 export async function reflectCommand(args: string[]): Promise<void> {
   // Parse flags
@@ -19,8 +20,8 @@ export async function reflectCommand(args: string[]): Promise<void> {
     const arg = args[i];
     if (arg === '--model' && args[i + 1]) {
       const modelArg = args[++i];
-      if (modelArg === 'haiku') model = 'claude-haiku-4-5';
-      else if (modelArg === 'sonnet') model = 'claude-sonnet-4-5';
+      if (modelArg === 'haiku') model = DEFAULT_FAST_MODEL;
+      else if (modelArg === 'sonnet') model = DEFAULT_REASONING_MODEL;
       else if (modelArg === 'opus') model = 'claude-opus-4-5';
       else model = modelArg;
     } else if (arg === '--dry-run') {

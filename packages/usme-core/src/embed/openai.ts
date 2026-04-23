@@ -5,11 +5,11 @@
 import OpenAI from "openai";
 import { LRUCache } from "lru-cache";
 import { logger } from "../logger.js";
+import { DEFAULT_EMBEDDING_MODEL, EMBEDDING_DIMENSIONS } from "../config/models.js";
 
 const log = logger.child({ module: "openai-embed" });
 
-const EMBEDDING_MODEL = "text-embedding-3-small";
-const EMBEDDING_DIMENSIONS = 1536;
+const EMBEDDING_MODEL = DEFAULT_EMBEDDING_MODEL;
 
 const embeddingCache = new LRUCache<string, number[]>({ max: 5000 });
 

@@ -16,6 +16,7 @@ import {
   markCandidatesPrompted,
 } from "./promote.js";
 import { logger } from "../logger.js";
+import { DEFAULT_REASONING_MODEL } from "../config/models.js";
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -93,7 +94,7 @@ export function startScheduler(
   const reflectionMorningJob = cron.schedule('0 16 * * *', async () => {
     log.info('Starting scheduled reflection (08:00 Pacific)');
     try {
-      const result = await runReflection({ triggerSource: 'scheduler-morning', model: 'claude-sonnet-4-5' });
+      const result = await runReflection({ triggerSource: 'scheduler-morning', model: DEFAULT_REASONING_MODEL });
       // If candidates were written and we're in daytime, deliver them immediately
       if (result.candidatesCreated > 0) {
         log.info({ candidatesCreated: result.candidatesCreated }, 'reflection produced candidates — delivering now');
@@ -107,7 +108,7 @@ export function startScheduler(
   const reflectionEveningJob = cron.schedule('0 4 * * *', async () => {
     log.info('Starting scheduled reflection (20:00 Pacific)');
     try {
-      const result = await runReflection({ triggerSource: 'scheduler-evening', model: 'claude-sonnet-4-5' });
+      const result = await runReflection({ triggerSource: 'scheduler-evening', model: DEFAULT_REASONING_MODEL });
       // Evening reflection: if daytime (unlikely at 20:00), deliver; otherwise the morning cron handles it
       if (result.candidatesCreated > 0) {
         log.info({ candidatesCreated: result.candidatesCreated }, 'reflection produced candidates — scheduling morning delivery via flag');

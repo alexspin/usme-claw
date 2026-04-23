@@ -100,8 +100,8 @@ function ensureInjectionLogDir(): void {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
-  } catch {
-    // Best-effort: if dir creation fails, writes below will also fail and be swallowed
+  } catch (err) {
+    logger.warn({ err }, "[usme] Failed to create injection log directory — file writes will also fail");
   }
 }
 
@@ -364,7 +364,9 @@ export default function usmePlugin(api: {
         if (result.items.length > 0) {
           contextBlock = injectedToSystemAddition(result.items);
           dbg(`contextBlock built: length=${contextBlock.length} chars`);
-          void bumpAccessCounts(pool, result.items).catch(() => {/* ignore */});
+          void bumpAccessCounts(pool, result.items).catch((err: unknown) => {
+            logger.warn({ err }, "[usme] bumpAccessCounts failed (non-fatal)");
+          });
         } else {
           dbg(`result.items is empty — contextBlock will be empty string`);
         }

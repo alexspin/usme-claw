@@ -12,6 +12,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { getPool } from "../db/pool.js";
 import { logger } from "../logger.js";
 import { isPassing, extractGrade } from "./promote.js";
+import { DEFAULT_REASONING_MODEL } from "../config/models.js";
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -115,7 +116,7 @@ function extractToolInput(response: Anthropic.Message, toolName: string): unknow
 
 export async function runReflection(opts: ReflectionOptions): Promise<ReflectionResult> {
   const start = Date.now();
-  const model = opts.model ?? "claude-sonnet-4-5";
+  const model = opts.model ?? DEFAULT_REASONING_MODEL;
   const pool = getPool();
 
   log.info({ triggerSource: opts.triggerSource, model, dryRun: opts.dryRun }, "reflection starting");

@@ -8,6 +8,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { DEFAULT_FAST_MODEL, DEFAULT_REASONING_MODEL } from "@usme/core/config/models";
 
 // ── Mock @usme/core ───────────────────────────────────────────────────────────
 
@@ -70,7 +71,7 @@ describe("reflectCommand", () => {
     await reflectCommand(["--model", "haiku"]);
 
     const opts = mockRunReflection.mock.calls[0][0];
-    expect(opts.model).toBe("claude-haiku-4-5");
+    expect(opts.model).toBe(DEFAULT_FAST_MODEL);
   });
 
   it("--model sonnet maps to claude-sonnet-4-5", async () => {
@@ -79,7 +80,7 @@ describe("reflectCommand", () => {
     await reflectCommand(["--model", "sonnet"]);
 
     const opts = mockRunReflection.mock.calls[0][0];
-    expect(opts.model).toBe("claude-sonnet-4-5");
+    expect(opts.model).toBe(DEFAULT_REASONING_MODEL);
   });
 
   it("--status queries reflection_runs, does not call runReflection", async () => {

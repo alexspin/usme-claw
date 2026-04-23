@@ -20,15 +20,13 @@ import {
   getEnrichContext,
   embedText,
 } from "../index.js";
+import { toSlug } from "../utils/slug.js";
 
 // ── SKILL.md builder ───────────────────────────────────────────────────────
 
 function buildSkillMd(ctx: Awaited<ReturnType<typeof getEnrichContext>>): string {
   // slug for frontmatter name field
-  const slug = ctx.name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+  const slug = toSlug(ctx.name);
 
   // Frontmatter description is the triggering mechanism — dense, specific
   const triggerClause = ctx.triggerPattern ? ` Triggers on: ${ctx.triggerPattern}.` : "";
@@ -122,10 +120,7 @@ async function main() {
     }
     const candidate = candidates[0];
 
-    const skillSlug = candidate.name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "");
+    const skillSlug = toSlug(candidate.name);
     const workspaceDir = process.env.OPENCLAW_WORKSPACE_DIR ?? "/home/alex/ai/projects/.openclaw/workspace-rufus";
     const skillPath = `${workspaceDir}/skills/${skillSlug}/SKILL.md`;
 

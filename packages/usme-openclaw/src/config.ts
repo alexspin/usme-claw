@@ -3,6 +3,7 @@
  */
 
 import type { AssemblyMode } from "@usme/core";
+import { DEFAULT_FAST_MODEL, DEFAULT_REASONING_MODEL } from "@usme/core/config/models";
 
 /**
  * Plugin operating mode.
@@ -80,17 +81,17 @@ export const DEFAULT_CONFIG: UsmePluginConfig = {
   },
   extraction: {
     enabled: true,
-    model: "claude-haiku-4-5",
+    model: DEFAULT_FAST_MODEL,
     entityExtraction: {
       enabled: true,
-      model: "claude-haiku-4-5",
+      model: DEFAULT_FAST_MODEL,
     },
   },
   consolidation: {
     cron: "0 3 * * *",
-    sonnetModel: "claude-sonnet-4-6",
-    skillDraftingModel: "claude-sonnet-4-6",
-    reconciliationModel: "claude-sonnet-4-6",
+    sonnetModel: DEFAULT_REASONING_MODEL,
+    skillDraftingModel: DEFAULT_REASONING_MODEL,
+    reconciliationModel: DEFAULT_REASONING_MODEL,
     candidatesPerNight: 5,
   },
   assembly: {
