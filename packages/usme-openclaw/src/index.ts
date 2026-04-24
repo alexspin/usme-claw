@@ -224,19 +224,21 @@ export default function usmePlugin(api: {
   if (anthropicKey) {
     if (!_schedulerHandle) {
       const anthropicClient = new Anthropic({ apiKey: anthropicKey });
-      _schedulerHandle = startScheduler(anthropicClient, pool, {
-        sonnetModel: config.consolidation.sonnetModel,
-        opusModel: config.consolidation.skillDraftingModel,
-        embeddingApiKey: openaiKey,
-        cronExpression: config.consolidation.cron,
-        miniConsolidationIntervalMs: 30 * 60_000,
-        runOnStart: false,
-        sendFn: async (card: string) => {
-          const { execSync } = await import("node:child_process");
-          execSync(`openclaw system event --text ${JSON.stringify(card)} --mode now`, { stdio: 'inherit' });
-        },
-      });
-      api.logger.info("[usme] consolidation scheduler started");
+      void (async () => {
+        _schedulerHandle = await startScheduler(anthropicClient, pool, {
+          sonnetModel: config.consolidation.sonnetModel,
+          opusModel: config.consolidation.skillDraftingModel,
+          embeddingApiKey: openaiKey,
+          cronExpression: config.consolidation.cron,
+          miniConsolidationIntervalMs: 30 * 60_000,
+          runOnStart: false,
+          sendFn: async (card: string) => {
+            const { execSync } = await import("node:child_process");
+            execSync(`openclaw system event --text ${JSON.stringify(card)} --mode now`, { stdio: 'inherit' });
+          },
+        });
+        api.logger.info("[usme] consolidation scheduler started");
+      })();
     }
   } else {
     api.logger.warn("[usme] no ANTHROPIC_API_KEY — consolidation scheduler disabled");
@@ -526,7 +528,7 @@ export default function usmePlugin(api: {
     id: "usme-pool",
     start: () => {},
     stop: async () => {
-      _schedulerHandle?.stop();
+      await _schedulerHandle?.stop();
       _schedulerHandle = null;
       await getExtractionQueue().drain();
       await closePool();

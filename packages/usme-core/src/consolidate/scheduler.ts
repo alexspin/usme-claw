@@ -1,14 +1,15 @@
 /**
  * Cron scheduler for periodic consolidation.
  * Default schedule: "0 3 * * *" (periodic consolidation (default: 3am UTC, configure as needed)).
+ * Uses pg-boss for persistent, DB-backed scheduling.
  */
 
 import { execSync } from "node:child_process";
 import Anthropic from "@anthropic-ai/sdk";
-import cron from "node-cron";
 import type pg from "pg";
 import { runNightlyConsolidation, stepEpisodify } from "./nightly.js";
 import type { NightlyConfig, NightlyResult } from "./nightly.js";
+import { getPgBoss } from "../extract/pgboss.js";
 import { runReflection } from "./reflect.js";
 import {
   getPromoteCandidates,
@@ -34,8 +35,8 @@ export interface SchedulerConfig extends NightlyConfig {
 }
 
 export interface SchedulerHandle {
-  /** Stop the scheduled job. */
-  stop: () => void;
+  /** Stop the scheduled job (unregisters pg-boss schedules). */
+  stop: () => Promise<void>;
   /** Run the nightly job immediately (outside schedule). */
   runNow: () => Promise<NightlyResult>;
   /** Run mini-consolidation (sensory_trace → episodes) immediately. */
@@ -49,16 +50,14 @@ const log = logger.child({ module: "scheduler" });
 // ── Scheduler ──────────────────────────────────────────────
 
 /**
- * Start the nightly consolidation scheduler using node-cron.
+ * Start the nightly consolidation scheduler using pg-boss.
  */
-export function startScheduler(
+export async function startScheduler(
   client: Anthropic,
   pool: pg.Pool,
   config: SchedulerConfig = {},
-): SchedulerHandle {
+): Promise<SchedulerHandle> {
   const cronExpr = config.cronExpression ?? "0 3 * * *";
-  const miniIntervalMs = config.miniConsolidationIntervalMs ?? 30 * 60_000; // 30 min
-  let miniTimer: ReturnType<typeof setInterval> | null = null;
 
   const runMini = async (): Promise<number> => {
     log.info("Running mini-consolidation (sensory_trace → episodes)");
@@ -79,76 +78,77 @@ export function startScheduler(
     return result;
   };
 
-  const job = cron.schedule(cronExpr, async () => {
+  const boss = await getPgBoss();
+
+  // Register persistent cron schedules (idempotent upserts)
+  await boss.schedule("usme-nightly", cronExpr, {}, { tz: "UTC" });
+  await boss.schedule("usme-reflection-morning", "0 16 * * *", {}, { tz: "UTC" });
+  await boss.schedule("usme-reflection-evening", "0 4 * * *", {}, { tz: "UTC" });
+  await boss.schedule("usme-skill-delivery", "0 17 * * *", {}, { tz: "UTC" });
+  await boss.schedule("usme-mini-consolidation", "*/30 * * * *", {}, { tz: "UTC" });
+
+  log.info({ expr: cronExpr }, "nightly consolidation scheduler started (pg-boss)");
+
+  // Register workers for each scheduled queue
+  await boss.work("usme-nightly", { localConcurrency: 1 }, async () => {
     try {
       await runJob();
     } catch (err: unknown) {
       log.error({ err }, "nightly consolidation job failed");
     }
-  }, { timezone: "UTC", scheduled: false });
+  });
 
-  job.start();
-  log.info({ expr: cronExpr }, "nightly consolidation scheduler started");
-
-  // Memory Reflection Service — 08:00 and 20:00 Pacific
-  const reflectionMorningJob = cron.schedule('0 16 * * *', async () => {
-    log.info('Starting scheduled reflection (08:00 Pacific)');
+  await boss.work("usme-reflection-morning", { localConcurrency: 1 }, async () => {
+    log.info("Starting scheduled reflection (08:00 Pacific)");
     try {
-      const result = await runReflection({ triggerSource: 'scheduler-morning', model: DEFAULT_REASONING_MODEL });
-      // If candidates were written and we're in daytime, deliver them immediately
+      const result = await runReflection({ triggerSource: "scheduler-morning", model: DEFAULT_REASONING_MODEL });
       if (result.candidatesCreated > 0) {
-        log.info({ candidatesCreated: result.candidatesCreated }, 'reflection produced candidates — delivering now');
+        log.info({ candidatesCreated: result.candidatesCreated }, "reflection produced candidates — delivering now");
         await deliverSkillCandidates(pool, config.sendFn);
       }
     } catch (err) {
-      log.error({ err }, 'scheduled reflection (morning) failed');
+      log.error({ err }, "scheduled reflection (morning) failed");
     }
-  }, { timezone: 'UTC', scheduled: true });
+  });
 
-  const reflectionEveningJob = cron.schedule('0 4 * * *', async () => {
-    log.info('Starting scheduled reflection (20:00 Pacific)');
+  await boss.work("usme-reflection-evening", { localConcurrency: 1 }, async () => {
+    log.info("Starting scheduled reflection (20:00 Pacific)");
     try {
-      const result = await runReflection({ triggerSource: 'scheduler-evening', model: DEFAULT_REASONING_MODEL });
-      // Evening reflection: if daytime (unlikely at 20:00), deliver; otherwise the morning cron handles it
+      const result = await runReflection({ triggerSource: "scheduler-evening", model: DEFAULT_REASONING_MODEL });
       if (result.candidatesCreated > 0) {
-        log.info({ candidatesCreated: result.candidatesCreated }, 'reflection produced candidates — scheduling morning delivery via flag');
+        log.info({ candidatesCreated: result.candidatesCreated }, "reflection produced candidates — scheduling morning delivery via flag");
       }
     } catch (err) {
-      log.error({ err }, 'scheduled reflection (evening) failed');
+      log.error({ err }, "scheduled reflection (evening) failed");
     }
-  }, { timezone: 'UTC', scheduled: true });
+  });
 
-  // Skill candidate delivery — 09:00 Pacific = 17:00 UTC
-  const skillDeliveryJob = cron.schedule('0 17 * * *', async () => {
-    log.info('Running skill candidate delivery');
+  await boss.work("usme-skill-delivery", { localConcurrency: 1 }, async () => {
+    log.info("Running skill candidate delivery");
     try {
       await deliverSkillCandidates(pool, config.sendFn);
     } catch (err) {
-      log.error({ err }, 'skill candidate delivery failed');
+      log.error({ err }, "skill candidate delivery failed");
     }
-  }, { timezone: 'UTC', scheduled: true });
+  });
+
+  await boss.work("usme-mini-consolidation", { localConcurrency: 1 }, async () => {
+    await runMini().catch((err: unknown) => log.error({ err }, "mini-consolidation job failed"));
+  });
 
   // Optionally run on start
   if (config.runOnStart) {
     setImmediate(() => runJob().catch((err: unknown) => log.error({ err }, "nightly consolidation job failed")));
   }
 
-  // Start mini-consolidation interval
-  miniTimer = setInterval(() => {
-    runMini().catch((err: unknown) => log.error({ err }, "mini-consolidation job failed"));
-  }, miniIntervalMs);
-
   return {
-    stop: () => {
-      job.stop();
-      reflectionMorningJob.stop();
-      reflectionEveningJob.stop();
-      skillDeliveryJob.stop();
-      if (miniTimer) {
-        clearInterval(miniTimer);
-        miniTimer = null;
-      }
-      log.info("Scheduler stopped");
+    stop: async () => {
+      await boss.unschedule("usme-nightly");
+      await boss.unschedule("usme-reflection-morning");
+      await boss.unschedule("usme-reflection-evening");
+      await boss.unschedule("usme-skill-delivery");
+      await boss.unschedule("usme-mini-consolidation");
+      log.info("Scheduler stopped (schedules unregistered)");
     },
     runNow: runJob,
     runMiniNow: runMini,
