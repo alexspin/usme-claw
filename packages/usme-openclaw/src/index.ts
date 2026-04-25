@@ -19,8 +19,6 @@
  * Format: one JSON object per line (JSON lines), human-readable.
  */
 
-import fs from "node:fs";
-import path from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
 import {
   getPool,
@@ -88,76 +86,6 @@ export function injectedToSystemAddition(items: InjectedMemory[]): string {
 }
 
 export const id = "usme-claw";
-
-// ── Injection log ──────────────────────────────────────────────────────────────
-
-const INJECTION_LOG_FILE =
-  process.env.USME_INJECTION_LOG ?? "/tmp/usme/injection.jsonl";
-
-function ensureInjectionLogDir(): void {
-  const dir = path.dirname(INJECTION_LOG_FILE);
-  try {
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-  } catch (err) {
-    logger.warn({ err }, "[usme] Failed to create injection log directory — file writes will also fail");
-  }
-}
-
-interface InjectionLogEntry {
-  /** ISO-8601 wall time */
-  ts: string;
-  sessionId: string;
-  /** "active" | "log-only" */
-  mode: string;
-  /** Number of memory items packed into the context block */
-  itemsSelected: number;
-  /** Number of candidates considered before packing */
-  itemsConsidered: number;
-  /** Memory tiers that contributed candidates */
-  tiersQueried: string[];
-  /** Estimated tokens of the injected context block (0 in log-only) */
-  tokensInjected: number;
-  /** End-to-end pipeline duration in milliseconds */
-  durationMs: number;
-  /** True only in active mode when a non-empty context block was returned */
-  injected: boolean;
-  /** Full text of the assembled context block (empty string when no items) */
-  contextBlock: string;
-  /** Spreading activation depth used (undefined when disabled) */
-  spreadingDepth?: number;
-  /** Number of entities matched during spreading activation */
-  entitiesMatched?: number;
-  /** Number of episodes added by spreading activation */
-  episodesAdded?: number;
-}
-
-/**
- * Append one JSON-lines entry to the injection log (synchronous, best-effort).
- * Errors are swallowed so logging never affects the hot path.
- */
-function writeInjectionLog(entry: InjectionLogEntry): void {
-  // Fire-and-forget async write — never blocks the hot path
-  setImmediate(() => {
-    ensureInjectionLogDir();
-    fs.appendFile(INJECTION_LOG_FILE, JSON.stringify(entry) + "\n", "utf8", () => {
-      // Errors intentionally swallowed
-    });
-  });
-}
-
-// ── Debug logger (file-based, zero deps, always writable) ───────────────────
-
-const DBG_LOG = "/tmp/usme/debug.log";
-function dbg(msg: string): void {
-  setImmediate(() => {
-    try {
-      fs.mkdirSync("/tmp/usme", { recursive: true });
-      fs.appendFile(DBG_LOG, `[${new Date().toISOString()}] ${msg}\n`, "utf8", () => {});
-    } catch { /* never break the hot path */ }
-  });
-}
 
 // ── Scheduler singleton ────────────────────────────────────────────────────────
 
@@ -247,15 +175,13 @@ export default function usmePlugin(api: {
   const log = logger.child({ module: "index" });
   const isActive = effectiveMode === "active";
 
-  api.logger.info(
-    `[usme] mode=${effectiveMode} | injectionLog=${INJECTION_LOG_FILE}`,
-  );
+  api.logger.info(`[usme] mode=${effectiveMode}`);
 
   // ── Hook registration ──────────────────────────────────────────────────────
   //
   // The before_prompt_build hook can return { prependContext } to inject text
   // into the prompt. Returning void/undefined leaves the prompt unchanged.
-  dbg(`hook registration: mode=${effectiveMode} isActive=${isActive}`);
+  logger.debug({ mode: effectiveMode, isActive }, "[usme] hook registration");
   api.logger.info(`[usme] registering hook (mode=${effectiveMode})`);
 
   api.on(
@@ -273,10 +199,10 @@ export default function usmePlugin(api: {
 
       const sessionId = ev.sessionId ?? hookCtx?.sessionId ?? "unknown";
       const sessionKey = hookCtx?.sessionKey ?? "";
-      dbg(`hook fired: sessionId=${sessionId} sessionKey=${sessionKey} msgCount=${(ev.messages ?? []).length}`);
+      log.debug({ sessionId, sessionKey, msgCount: (ev.messages ?? []).length }, "[usme] hook fired");
 
       if (/^agent:[^:]+:(cron|subagent):/.test(sessionKey)) {
-        dbg(`early exit: cron/subagent session filter matched`);
+        log.debug("[usme] early exit: cron/subagent session filter matched");
         return undefined; // skip cron and subagent sessions — noise in memory
       }
 
@@ -296,16 +222,16 @@ export default function usmePlugin(api: {
         .reverse()
         .find((m) => m.role === "user");
 
-      dbg(`lastUserMsg: ${lastUserMsg ? `"${String(lastUserMsg.content).slice(0, 80)}"` : 'NULL'}`);
+      log.debug({ hasLastUserMsg: !!lastUserMsg, preview: lastUserMsg?.content?.slice(0, 80) }, "[usme] lastUserMsg");
       if (!lastUserMsg?.content) {
-        dbg(`early exit: no user message found`);
+        log.debug("[usme] early exit: no user message found");
         return undefined;
       }
 
       const query = stripMetadataEnvelope(extractText(lastUserMsg.content));
-      dbg(`query after strip: length=${query?.length ?? 0} preview="${(query ?? "").slice(0, 60)}"`);
+      log.debug({ queryLength: query?.length ?? 0, preview: (query ?? "").slice(0, 60) }, "[usme] query after strip");
       if (!query || query.length < 3) {
-        dbg(`early exit: query too short (${query?.length ?? 0} chars)`);
+        log.debug(`[usme] early exit: query too short (${query?.length ?? 0} chars)`);
         return undefined;
       }
 
@@ -320,23 +246,23 @@ export default function usmePlugin(api: {
 
       try {
         const embeddingKey = config.embeddingApiKey || openaiKey;
-        dbg(`embeddingKey: ${embeddingKey ? `set (len=${embeddingKey.length})` : 'MISSING'}`);
+        log.debug({ hasKey: !!embeddingKey, keyLen: embeddingKey?.length }, "[usme] embeddingKey check");
         if (!embeddingKey) {
           log.warn("no embedding API key — skipping USME pipeline this turn");
-          dbg(`early exit: no embedding API key`);
+          log.debug("[usme] early exit: no embedding API key");
           return undefined;
         }
 
-        dbg(`calling embedText query="${query.slice(0, 60)}"`);
+        log.debug({ queryPreview: query.slice(0, 60) }, "[usme] calling embedText");
         const queryEmbedding = await embedText(query, embeddingKey);
-        dbg(`embedText OK: vector length=${queryEmbedding?.length ?? 'null'}`);
+        log.debug({ vectorLength: queryEmbedding?.length ?? null }, "[usme] embedText OK");
 
         const assemblyMode = config.assembly.defaultMode;
         const tokenBudget = (
           config.assembly.modes as Record<string, { tokenBudget: number }>
         )[assemblyMode].tokenBudget;
 
-        dbg(`calling coreAssemble: mode=${assemblyMode} tokenBudget=${tokenBudget} turnIndex=${agentMessages.filter((m) => m.role === "user").length}`);
+        log.debug({ mode: assemblyMode, tokenBudget, turnIndex: agentMessages.filter(m => m.role === "user").length }, "[usme] calling coreAssemble");
 
         const spreadingDepth = config.spreading?.maxDepth ?? 2;
         const spreadingPass = spreadingDepth > 0 ? {
@@ -361,20 +287,18 @@ export default function usmePlugin(api: {
         tiersQueried = result.metadata.tiersQueried as string[];
         tokensInjected = result.metadata.tokensUsed;
         _spreadingMetrics = (result.metadata as { spreadingMetrics?: { entitiesMatched: number; episodesAdded: number; spreadDepth: number } }).spreadingMetrics;
-        dbg(`coreAssemble OK: itemsSelected=${itemsSelected} itemsConsidered=${itemsConsidered} tiers=${tiersQueried.join(",")} tokens=${tokensInjected} spreading.episodesAdded=${_spreadingMetrics?.episodesAdded ?? 0}`);
+        log.debug({ itemsSelected, itemsConsidered, tiersQueried, tokensInjected, spreadingEpisodesAdded: _spreadingMetrics?.episodesAdded ?? 0 }, "[usme] coreAssemble OK");
 
         if (result.items.length > 0) {
           contextBlock = injectedToSystemAddition(result.items);
-          dbg(`contextBlock built: length=${contextBlock.length} chars`);
+          log.debug({ contextBlockLength: contextBlock.length }, "[usme] contextBlock built");
           void bumpAccessCounts(pool, result.items).catch((err: unknown) => {
             logger.warn({ err }, "[usme] bumpAccessCounts failed (non-fatal)");
           });
         } else {
-          dbg(`result.items is empty — contextBlock will be empty string`);
+          log.debug("[usme] result.items empty — contextBlock will be empty");
         }
       } catch (err) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        dbg(`PIPELINE ERROR: ${errMsg}`);
         log.error({ err }, "USME pipeline failed — skipping injection this turn");
         return undefined;
       }
@@ -382,8 +306,8 @@ export default function usmePlugin(api: {
       const durationMs = performance.now() - pipelineStart;
 
       // ── Write structured injection log entry ──────────────────────────────
-      writeInjectionLog({
-        ts: new Date().toISOString(),
+      log.info({
+        type: "injection",
         sessionId,
         mode: effectiveMode,
         itemsSelected,
@@ -392,18 +316,17 @@ export default function usmePlugin(api: {
         tokensInjected,
         durationMs: Math.round(durationMs),
         injected: isActive && contextBlock.length > 0,
-        contextBlock,
         spreadingDepth: _spreadingMetrics?.spreadDepth,
         entitiesMatched: _spreadingMetrics?.entitiesMatched,
         episodesAdded: _spreadingMetrics?.episodesAdded,
-      });
+      }, "[usme] injection");
 
-      dbg(`pipeline done: durationMs=${Math.round(performance.now() - pipelineStart)} injected=${isActive && contextBlock.length > 0}`);
+      log.debug({ durationMs: Math.round(performance.now() - pipelineStart), injected: isActive && contextBlock.length > 0 }, "[usme] pipeline done");
 
       // ── Fire-and-forget extraction (fact + entity) ────────────────────────
       // Runs after retrieval so it never blocks injection. Uses the same
       // agentMessages already normalized above.
-      dbg(`extraction check: enabled=${config.extraction?.enabled} anthropicKey=${anthropicKey ? 'set' : 'MISSING'}`);
+      log.debug({ extractionEnabled: config.extraction?.enabled, hasAnthropicKey: !!anthropicKey }, "[usme] extraction check");
       if (config.extraction?.enabled && anthropicKey) {
         const serializedTurn = agentMessages
           .filter((m) => m.role === "user" || m.role === "assistant")
@@ -415,42 +338,42 @@ export default function usmePlugin(api: {
           .slice(-4)
           .join("\n\n");
 
-        dbg(`serializedTurn length=${serializedTurn.length}`);
+        log.debug({ serializedTurnLength: serializedTurn.length }, "[usme] serializedTurn");
         if (/\bHEARTBEAT\b/i.test(serializedTurn)) {
-          dbg(`extraction skipped: serializedTurn matches HEARTBEAT pattern`);
+          log.debug("[usme] extraction skipped: HEARTBEAT pattern");
           // fall through to injection return below
         } else if (serializedTurn) {
           const anthropicClient = new Anthropic({ apiKey: anthropicKey });
           const queue = getExtractionQueue();
-          dbg(`enqueueing fact extraction model=${config.extraction.model}`);
+          log.debug({ model: config.extraction.model }, "[usme] enqueueing fact extraction");
           queue.enqueue(async () => {
-            dbg(`runFactExtraction START`);
+            log.debug("[usme] runFactExtraction start");
             try {
               await runFactExtraction(
                 anthropicClient, pool,
                 { sessionId, turnIndex: agentMessages.filter((m) => m.role === "user").length, serializedTurn },
                 { model: config.extraction.model, embeddingApiKey: config.embeddingApiKey || openaiKey },
               );
-              dbg(`runFactExtraction OK`);
-            } catch (err) { dbg(`runFactExtraction ERROR: ${err instanceof Error ? err.message : String(err)}`); }
+              log.debug("[usme] runFactExtraction OK");
+            } catch (err) { log.error({ err }, "[usme] runFactExtraction failed"); }
           });
           const entityEnabled = config.extraction.entityExtraction?.enabled;
-          dbg(`entity extraction enabled=${entityEnabled}`);
+          log.debug({ entityExtractionEnabled: entityEnabled }, "[usme] entity extraction check");
           if (entityEnabled) {
             queue.enqueue(async () => {
-              dbg(`runEntityExtraction START`);
+              log.debug("[usme] runEntityExtraction start");
               try {
                 await runEntityExtraction(
                   anthropicClient, pool,
                   serializedTurn,
                   { model: config.extraction.entityExtraction.model, embeddingApiKey: config.embeddingApiKey || openaiKey },
                 );
-                dbg(`runEntityExtraction OK`);
-              } catch (err) { dbg(`runEntityExtraction ERROR: ${err instanceof Error ? err.message : String(err)}`); }
+                log.debug("[usme] runEntityExtraction OK");
+              } catch (err) { log.error({ err }, "[usme] runEntityExtraction failed"); }
             });
           }
         } else {
-          dbg(`extraction skipped: serializedTurn empty`);
+          log.debug("[usme] extraction skipped: serializedTurn empty");
         }
       }
 
