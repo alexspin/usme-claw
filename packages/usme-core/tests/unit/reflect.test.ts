@@ -64,13 +64,14 @@ function makeReflectionResponse(
 }
 
 function makeEmptyCorpusQueries() {
-  // pool.query is called 5 times for corpus fetch: concepts, episodes, traces, entities, existing skills
+  // pool.query is called 6 times for corpus fetch: concepts, episodes, traces, entities, existing skills, pending candidates
   mockQuery
     .mockResolvedValueOnce({ rows: [] }) // concepts
     .mockResolvedValueOnce({ rows: [] }) // episodes
     .mockResolvedValueOnce({ rows: [] }) // traces
     .mockResolvedValueOnce({ rows: [] }) // entities
-    .mockResolvedValueOnce({ rows: [] }); // existing skill names (SELECT name FROM skills)
+    .mockResolvedValueOnce({ rows: [] }) // existing skill names (SELECT name FROM skills)
+    .mockResolvedValueOnce({ rows: [] }); // pending skill_candidates
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

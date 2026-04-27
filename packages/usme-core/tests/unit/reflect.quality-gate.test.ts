@@ -59,13 +59,14 @@ function makeReflectionResponse(grade: string, skills: { name: string; descripti
 }
 
 function setupEmptyCorpus() {
-  // Pool.query for corpus fetch: concepts, episodes, traces, entities, skills
+  // Pool.query for corpus fetch: concepts, episodes, traces, entities, skills, pending candidates
   mockQuery
     .mockResolvedValueOnce({ rows: [] }) // concepts
     .mockResolvedValueOnce({ rows: [] }) // episodes
     .mockResolvedValueOnce({ rows: [] }) // traces
     .mockResolvedValueOnce({ rows: [] }) // entities
-    .mockResolvedValueOnce({ rows: [] }); // existing skills
+    .mockResolvedValueOnce({ rows: [] }) // existing skills
+    .mockResolvedValueOnce({ rows: [] }); // pending skill_candidates
 }
 
 function setupTransactionMocks() {

@@ -37,6 +37,8 @@ export interface ReflectionResult {
   durationMs: number;
   /** Number of skill_candidates rows written in this run (0 if grade too low). */
   candidatesCreated: number;
+  /** Number of skill_candidates dismissed as near-duplicates in this run. */
+  dismissalsProcessed: number;
 }
 
 // ── Logger ─────────────────────────────────────────────────
@@ -100,6 +102,10 @@ const ReflectionOutputSchema = z.object({
   contradictions: z.array(ContradictionSchema),
   entity_updates: z.array(EntityUpdateSchema),
   overall_assessment: z.string(),
+  candidate_dismissals: z.array(z.object({
+    candidate_id: z.number(),
+    reason: z.string(),
+  })).default([]),
 });
 
 // ── Helpers ────────────────────────────────────────────────
@@ -167,9 +173,14 @@ export async function runReflection(opts: ReflectionOptions): Promise<Reflection
     ? existingSkills.map((r: { name: string }) => `"${r.name}"`).join(', ')
     : '(none yet)';
 
+  const candidatesResult = await pool.query(
+    `SELECT id, name, description FROM skill_candidates WHERE dismissed_at IS NULL ORDER BY created_at DESC`
+  );
+  const pendingCandidates = candidatesResult.rows;
+
   const fetchDurationMs = Date.now() - fetchStart;
   log.info(
-    { concepts: concepts.length, episodes: episodes.length, traces: traces.length, entities: entities.length, existingSkills: existingSkills.length, durationMs: fetchDurationMs },
+    { concepts: concepts.length, episodes: episodes.length, traces: traces.length, entities: entities.length, existingSkills: existingSkills.length, pendingCandidates: pendingCandidates.length, durationMs: fetchDurationMs },
     "reflection corpus fetched",
   );
 
@@ -303,7 +314,18 @@ After your thinking block, call the reflection_output tool with:
 
 1. **concept_updates** — raise/lower importance, deprecate outdated or superseded concepts, merge duplicates. For each, ask: Is this still true? Is it specific enough to be useful? Is it already captured more precisely elsewhere?
 
-2. **new_skills** — patterns that recur across multiple episodes and would transfer to similar future situations. Only include skills with confidence >= 0.5; anything lower is not worth proposing. Prefer fewer, higher-quality skills over a long list of marginal ones. **Do not propose a skill whose name already exists in the skills table** — duplicates will be silently dropped. Existing skill names: ${existingSkillNames}. For each skill, populate **source_episode_ids** with the slug strings from the [ep:<slug>] labels in the corpus above that evidence the pattern — copy the slug exactly as it appears (e.g. ["fix-postgres-savepoint-cascade", "debug-max-tokens-truncation"]). Do not invent slugs that are not in the corpus.
+2. **new_skills** — patterns that recur across multiple episodes and would transfer to similar future situations. Only include skills with confidence >= 0.5; anything lower is not worth proposing. Prefer fewer, higher-quality skills over a long list of marginal ones. **Do not propose a skill whose name already exists in the skills table** — duplicates will be silently dropped. For each skill, populate **source_episode_ids** with the slug strings from the [ep:<slug>] labels in the corpus above that evidence the pattern — copy the slug exactly as it appears (e.g. ["fix-postgres-savepoint-cascade", "debug-max-tokens-truncation"]). Do not invent slugs that are not in the corpus.
+
+Active skills (already promoted — do NOT reproduce these):
+${existingSkills.length > 0 ? existingSkills.map((s: { name: string }) => `- ${s.name}`).join('\n') : '(none yet)'}
+
+Pending review queue (already in the candidate backlog — do NOT propose near-duplicates of these):
+${pendingCandidates.length > 0 ? pendingCandidates.map((c: { id: number; name: string; description: string }) => `- [${c.id}] ${c.name}: ${c.description}`).join('\n') : '(none yet)'}
+
+When you see near-duplicates in the pending review queue, include them in candidate_dismissals with one of these reasons:
+- "too specific: single incident, will not recur"
+- "duplicate: covered by [candidate name]"
+- "micro-pattern: not generalizable across domains"
 
 **CRITICAL — array field rules:** concept_updates, new_skills, contradictions, and entity_updates MUST always be JSON arrays. If there are no items, return an empty array []. NEVER return a string, null, or words like "None", "N/A", or "NONE" for these fields — those values will be silently lost and the data will be discarded.
 
@@ -407,6 +429,18 @@ NOT as a literal multi-line block. If you write actual line breaks inside a JSON
             },
           },
           overall_assessment: { type: "string" },
+          candidate_dismissals: {
+            type: "array",
+            description: "IDs of pending skill_candidates to dismiss as near-duplicates or non-generalizable patterns.",
+            items: {
+              type: "object",
+              properties: {
+                candidate_id: { type: "number" },
+                reason: { type: "string" },
+              },
+              required: ["candidate_id", "reason"],
+            },
+          },
         },
         required: ["concept_updates", "new_skills", "contradictions", "entity_updates", "overall_assessment"],
       },
@@ -551,6 +585,7 @@ NOT as a literal multi-line block. If you write actual line breaks inside a JSON
       overallAssessment: output.overall_assessment,
       durationMs,
       candidatesCreated: 0,
+      dismissalsProcessed: 0,
     };
   }
 
@@ -559,6 +594,7 @@ NOT as a literal multi-line block. If you write actual line breaks inside a JSON
   const client2 = await pgPool.connect();
   let runId = -1;
   let candidatesCreated = 0;
+  let dismissalsProcessed = 0;
 
   const changes = {
     conceptsUpdated: 0,
@@ -616,6 +652,26 @@ NOT as a literal multi-line block. If you write actual line breaks inside a JSON
       }
     }
 
+    // ── Process candidate_dismissals ────────────────────
+    const dismissals = output.candidate_dismissals ?? [];
+    if (dismissals.length > 0) {
+      await client2.query('SAVEPOINT candidate_dismissals');
+      try {
+        for (const d of dismissals) {
+          await client2.query(
+            `UPDATE skill_candidates SET dismissed_at = NOW(), updated_at = NOW() WHERE id = $1`,
+            [d.candidate_id]
+          );
+          dismissalsProcessed++;
+        }
+        await client2.query('RELEASE SAVEPOINT candidate_dismissals');
+        log.info(`Dismissed ${dismissalsProcessed} candidates`);
+      } catch (err) {
+        await client2.query('ROLLBACK TO SAVEPOINT candidate_dismissals');
+        log.error({ err }, 'Failed to process candidate_dismissals');
+      }
+    }
+
     // ── Apply new skills (quality-gated) ────────────────
     // ALL qualifying candidates (confidence >= 0.5) go to skill_candidates.
     // quality_tier:
@@ -630,6 +686,16 @@ NOT as a literal multi-line block. If you write actual line breaks inside a JSON
         }
 
         const qualityTier = skill.confidence >= 0.7 ? 'candidate' : 'draft';
+
+        // trgm similarity guard
+        const trgmCheck = await client2.query(
+          `SELECT id, name FROM skill_candidates WHERE dismissed_at IS NULL AND similarity(name, $1) > 0.5 ORDER BY similarity(name, $1) DESC LIMIT 1`,
+          [skill.name]
+        );
+        if (trgmCheck.rows.length > 0) {
+          log.info(`Skipping '${skill.name}' — too similar to existing candidate '${trgmCheck.rows[0].name}' (trgm guard)`);
+          continue;
+        }
 
         const sp = `sp_${spCount++}`;
         await client2.query(`SAVEPOINT ${sp}`);
@@ -802,6 +868,7 @@ NOT as a literal multi-line block. If you write actual line breaks inside a JSON
       overallAssessment: output.overall_assessment,
       durationMs,
       candidatesCreated,
+      dismissalsProcessed,
     };
   } catch (err) {
     await client2.query("ROLLBACK");
