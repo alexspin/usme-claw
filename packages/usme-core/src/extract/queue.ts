@@ -104,6 +104,10 @@ export class ExtractionQueue {
     this._initPromise = (async () => {
       const boss = await getPgBoss();
 
+      // pg-boss v12+ requires queues to exist before work()/send()
+      await boss.createQueue(QUEUE_NAME).catch(() => {});
+      await boss.createQueue(DLQ_NAME).catch(() => {});
+
       await boss.work<{ jobId: string }>(
         QUEUE_NAME,
         { localConcurrency: 1 },
