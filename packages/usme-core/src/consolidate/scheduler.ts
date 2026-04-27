@@ -80,6 +80,12 @@ export async function startScheduler(
 
   const boss = await getPgBoss();
 
+  // pg-boss v12+ requires queues to exist before scheduling
+  const queues = ["usme-nightly", "usme-reflection-morning", "usme-reflection-evening", "usme-skill-delivery", "usme-mini-consolidation"];
+  for (const q of queues) {
+    await boss.createQueue(q).catch(() => { /* already exists — idempotent */ });
+  }
+
   // Register persistent cron schedules (idempotent upserts)
   await boss.schedule("usme-nightly", cronExpr, {}, { tz: "UTC" });
   await boss.schedule("usme-reflection-morning", "0 16 * * *", {}, { tz: "UTC" });

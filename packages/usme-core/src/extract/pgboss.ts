@@ -11,10 +11,7 @@ export async function getPgBoss(): Promise<PgBoss> {
   if (startPromise) return startPromise;
 
   startPromise = (async () => {
-    const url = process.env.DATABASE_URL;
-    if (!url) {
-      throw new Error("DATABASE_URL env var is required for pg-boss");
-    }
+    const url = process.env.DATABASE_URL ?? "postgres://usme:usme_dev@localhost:5432/usme";
     const b = new PgBoss(url);
     b.on("error", (err: unknown) => log.error({ err }, "pg-boss error"));
     await b.start();
