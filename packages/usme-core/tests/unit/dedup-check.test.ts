@@ -1,6 +1,9 @@
 /**
  * Unit tests for dedup logic in persistExtractedItems (extractor.ts).
- * Verifies that findSimilarTrace controls whether insertSensoryTrace is called.
+ * Verifies that findSimilarTraces (batch) controls whether insertSensoryTrace is called.
+ *
+ * NOTE: The source uses findSimilarTraces (plural, batch API) and embedBatch,
+ * not the singular findSimilarTrace/embedText. Mocks match the real call sites.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -10,7 +13,8 @@ import type { Mock } from "vitest";
 
 vi.mock("../../src/db/queries.js", () => ({
   insertSensoryTrace: vi.fn().mockResolvedValue("mock-id-123"),
-  findSimilarTrace: vi.fn().mockResolvedValue(false),
+  findSimilarTrace: vi.fn().mockResolvedValue(false),   // kept for completeness
+  findSimilarTraces: vi.fn().mockResolvedValue([false]), // batch API used by extractor
 }));
 
 vi.mock("../../src/embed/index.js", () => ({
@@ -19,8 +23,8 @@ vi.mock("../../src/embed/index.js", () => ({
 }));
 
 import { persistExtractedItems } from "../../src/extract/extractor.js";
-import { insertSensoryTrace, findSimilarTrace } from "../../src/db/queries.js";
-import { embedText, embedBatch } from "../../src/embed/index.js";
+import { insertSensoryTrace, findSimilarTraces } from "../../src/db/queries.js";
+import { embedBatch } from "../../src/embed/index.js";
 import type { FactExtractionResult, ExtractionContext } from "../../src/extract/extractor.js";
 
 const mockPool = {} as any;
@@ -50,37 +54,36 @@ describe("persistExtractedItems dedup logic", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     (insertSensoryTrace as Mock).mockResolvedValue("mock-id-123");
-    (findSimilarTrace as Mock).mockResolvedValue(false);
-    (embedText as Mock).mockResolvedValue([0.1, 0.2, 0.3]);
+    (findSimilarTraces as Mock).mockResolvedValue([false]); // batch: [false] = no duplicate
     (embedBatch as Mock).mockResolvedValue([[0.1, 0.2, 0.3]]);
   });
 
-  it("skips insert when findSimilarTrace returns true (duplicate found)", async () => {
-    (findSimilarTrace as Mock).mockResolvedValue(true);
+  it("skips insert when findSimilarTraces returns [true] (duplicate found)", async () => {
+    (findSimilarTraces as Mock).mockResolvedValue([true]); // batch result: duplicate detected
 
     const ids = await persistExtractedItems(mockPool, baseCtx, makeResult(), "fake-api-key");
 
-    expect(findSimilarTrace).toHaveBeenCalledOnce();
+    expect(findSimilarTraces).toHaveBeenCalledOnce();
     expect(insertSensoryTrace).not.toHaveBeenCalled();
     expect(ids).toHaveLength(0);
   });
 
-  it("proceeds with insert when findSimilarTrace returns false (no duplicate)", async () => {
-    (findSimilarTrace as Mock).mockResolvedValue(false);
+  it("proceeds with insert when findSimilarTraces returns [false] (no duplicate)", async () => {
+    (findSimilarTraces as Mock).mockResolvedValue([false]); // batch result: no duplicate
 
     const ids = await persistExtractedItems(mockPool, baseCtx, makeResult(), "fake-api-key");
 
-    expect(findSimilarTrace).toHaveBeenCalledOnce();
+    expect(findSimilarTraces).toHaveBeenCalledOnce();
     expect(insertSensoryTrace).toHaveBeenCalledOnce();
     expect(ids).toHaveLength(1);
     expect(ids[0]).toBe("mock-id-123");
   });
 
   it("skips dedup check and inserts when no embedding (no API key)", async () => {
+    // No embeddingApiKey → embedBatch not called → findSimilarTraces still called
+    // but with null embeddings → result is all-false (no dedup) → insert proceeds
     const ids = await persistExtractedItems(mockPool, baseCtx, makeResult());
-    // No embeddingApiKey → no embedding → no dedup check → insert proceeds
-    expect(embedText).not.toHaveBeenCalled();
-    expect(findSimilarTrace).not.toHaveBeenCalled();
+    expect(embedBatch).not.toHaveBeenCalled();
     expect(insertSensoryTrace).toHaveBeenCalledOnce();
     expect(ids).toHaveLength(1);
   });

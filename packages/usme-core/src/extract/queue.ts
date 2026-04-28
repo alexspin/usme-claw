@@ -104,9 +104,12 @@ export class ExtractionQueue {
     this._initPromise = (async () => {
       const boss = await getPgBoss();
 
-      // pg-boss v12+ requires queues to exist before work()/send()
-      await boss.createQueue(QUEUE_NAME).catch(() => {});
-      await boss.createQueue(DLQ_NAME).catch(() => {});
+      // pg-boss v12+ requires queues to exist before work()/send().
+      // Guard with typeof check so test mocks without createQueue don't throw.
+      if (typeof (boss as any).createQueue === "function") {
+        await boss.createQueue(QUEUE_NAME).catch(() => {});
+        await boss.createQueue(DLQ_NAME).catch(() => {});
+      }
 
       await boss.work<{ jobId: string }>(
         QUEUE_NAME,
