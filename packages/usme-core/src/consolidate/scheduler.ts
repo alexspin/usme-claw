@@ -4,7 +4,6 @@
  * Uses pg-boss for persistent, DB-backed scheduling.
  */
 
-import { execFileSync } from "node:child_process";
 import Anthropic from "@anthropic-ai/sdk";
 import type pg from "pg";
 import { runNightlyConsolidation, stepEpisodify } from "./nightly.js";
@@ -216,16 +215,8 @@ export async function deliverSkillCandidates(
     log2.info("delivering via sendFn");
     await sendFn(card);
   } else {
-    log2.info("no sendFn — falling back to execSync openclaw system event");
-    const eventText = `[USME-MORNING] ${candidates.length} skill candidate(s) ready for review. Run: npx tsx list-candidates.ts --force`;
-    try {
-      execFileSync("openclaw", ["system", "event", "--text", eventText, "--mode", "now"], {
-        stdio: "inherit",
-      });
-    } catch (execErr) {
-      log2.warn({ execErr }, "[usme] deliverSkillCandidates: openclaw system event failed, falling back to console.log");
-      console.log(card);
-    }
+    log2.info("no sendFn wired — printing card to console");
+    console.log(card);
   }
 
   log2.info({ count: candidates.length }, "skill candidates delivered for review");
