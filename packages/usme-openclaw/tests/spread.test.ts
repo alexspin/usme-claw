@@ -74,9 +74,10 @@ describe("spreadingActivation", () => {
 
       const mockPool = {
         query: vi.fn()
-          // First query: SELECT all entities
-          .mockResolvedValueOnce({ rows: [{ id: "entity-alex", canonical: "Alex Spinelli", name: "Alex" }] }),
-        // "Alex Spinelli" does NOT appear in "some generic content with no entity names"
+          // 1. Exact entity match: tokens don't match any entity → empty
+          .mockResolvedValueOnce({ rows: [] })
+          // 2. Fuzzy fallback: also no match
+          .mockResolvedValueOnce({ rows: [] }),
       } as any;
 
       const result = await spreadingActivation(input, mockPool, { maxDepth: 2, maxAdditional: 10 });
@@ -89,30 +90,22 @@ describe("spreadingActivation", () => {
     });
 
     it("adds connected episodes when entities match at depth=2", async () => {
-      // Candidate content mentions "alex" (canonical "Alex Spinelli")
-      const input = [makeCandidate("ep-1", "alex worked on the refactor today")];
+      // Candidate content mentions "alex" and "usme" — both match entity canonicals
+      const input = [makeCandidate("ep-1", "alex worked on the usme refactor today")];
 
       const mockPool = {
         query: vi.fn()
-          // 1. Fetch all entities
+          // 1. Exact entity match: tokens ["alex", "usme"] → both hit
           .mockResolvedValueOnce({
             rows: [
-              { id: "entity-alex", canonical: "alex", name: "Alex" },
-              { id: "entity-usme", canonical: "usme", name: "USME" },
+              { id: "entity-alex" },
+              { id: "entity-usme" },
             ],
           })
-          // 2. Walk relationships at depth=1: entity-alex → entity-usme
-          .mockResolvedValueOnce({ rows: [{ related_id: "entity-usme" }] })
-          // 3. Walk relationships at depth=2: entity-usme → (no new)
+          // 2. Walk relationships depth=1: no new entities (loop exits early at depth=2 check)
           .mockResolvedValueOnce({ rows: [] })
-          // 4. Fetch canonical names for all matched entities
-          .mockResolvedValueOnce({
-            rows: [
-              { canonical: "alex", name: "Alex" },
-              { canonical: "usme", name: "USME" },
-            ],
-          })
-          // 5. Find new episodes referencing those entities
+          // 3. Episode fetch via entity_ids GIN overlap
+          //    (depth=2 loop iteration is skipped because currentIds is empty after depth=1)
           .mockResolvedValueOnce({
             rows: [
               {
@@ -140,8 +133,8 @@ describe("spreadingActivation", () => {
     it("caps added episodes at maxAdditional", async () => {
       const input = [makeCandidate("ep-1", "alex mentioned the project plan")];
 
-      // Build 5 extra episodes but maxAdditional=2
-      const extraEpisodes = Array.from({ length: 5 }, (_, i) => ({
+      // Build 2 episodes (DB respects LIMIT $3 = maxAdditional=2)
+      const extraEpisodes = Array.from({ length: 2 }, (_, i) => ({
         id: `extra-ep-${i}`,
         content: `extra content ${i}`,
         importance_score: 6,
@@ -153,15 +146,13 @@ describe("spreadingActivation", () => {
 
       const mockPool = {
         query: vi.fn()
-          // 1. Fetch all entities
-          .mockResolvedValueOnce({ rows: [{ id: "entity-alex", canonical: "alex", name: "Alex" }] })
-          // 2. Walk relationships depth=1 → returns no new ids, loop breaks early
+          // 1. Exact entity match: "alex" matches
+          .mockResolvedValueOnce({ rows: [{ id: "entity-alex" }] })
+          // 2. Walk relationships depth=1 → no new ids, loop exits
           .mockResolvedValueOnce({ rows: [] })
-          // (depth=2 query never fires because currentIds is empty after depth=1)
-          // 3. Fetch canonical names for matched entities
-          .mockResolvedValueOnce({ rows: [{ canonical: "alex", name: "Alex" }] })
-          // 4. DB returns 2 episodes (LIMIT 2 enforced by maxAdditional)
-          .mockResolvedValueOnce({ rows: extraEpisodes.slice(0, 2) }),
+          // 3. Walk relationships depth=2 → skipped (currentIds empty)
+          // 4. Episode fetch returns 2 rows (LIMIT=maxAdditional enforced by DB)
+          .mockResolvedValueOnce({ rows: extraEpisodes }),
       } as any;
 
       const result = await spreadingActivation(input, mockPool, { maxDepth: 2, maxAdditional: 2 });
@@ -183,10 +174,11 @@ describe("spreadingActivation", () => {
 
       const mockPool = {
         query: vi.fn()
-          .mockResolvedValueOnce({ rows: [{ id: "entity-alex", canonical: "alex", name: "Alex" }] })
-          .mockResolvedValueOnce({ rows: [] }) // relationships
-          .mockResolvedValueOnce({ rows: [{ canonical: "alex", name: "Alex" }] }) // entity names
-          // DB returns ep-3 only (ep-1 and ep-2 excluded via != ALL($2))
+          // 1. Exact entity match: "alex" matches
+          .mockResolvedValueOnce({ rows: [{ id: "entity-alex" }] })
+          // 2. Walk relationships depth=1 → no new ids
+          .mockResolvedValueOnce({ rows: [] })
+          // 3. Episode fetch: DB returns ep-3 only (ep-1 and ep-2 excluded via != ALL($2))
           .mockResolvedValueOnce({
             rows: [{ id: "ep-3", content: "alex result", importance_score: 8, utility_score: 0.7, access_count: 2, created_at: new Date(), embedding: null }],
           }),
