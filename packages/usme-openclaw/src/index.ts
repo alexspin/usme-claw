@@ -161,8 +161,21 @@ export default function usmePlugin(api: {
           miniConsolidationIntervalMs: 30 * 60_000,
           runOnStart: false,
           sendFn: async (card: string) => {
-            const { execSync } = await import("node:child_process");
-            execSync(`openclaw system event --text ${JSON.stringify(card)} --mode now`, { stdio: 'inherit' });
+            const { execFileSync } = await import("node:child_process");
+            // Build a system event that wakes Rufus and instructs it to present the card
+            const eventText = `[USME-SKILL-DELIVERY] Skill candidate review is ready. Present the following skill candidates to the user for promotion decisions:\n\n${card}`;
+            try {
+              execFileSync(
+                "openclaw",
+                ["system", "event", "--text", eventText, "--mode", "now"],
+                { stdio: "inherit" },
+              );
+              api.logger.info("[usme] skill delivery system event fired successfully");
+            } catch (err) {
+              api.logger.error(`[usme] skill delivery system event failed: ${err instanceof Error ? err.message : String(err)}`);
+              // Log the card so it is not lost
+              api.logger.info(`[usme] skill delivery card (fallback log): ${card}`);
+            }
           },
         });
         api.logger.info("[usme] consolidation scheduler started");

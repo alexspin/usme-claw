@@ -245,11 +245,7 @@ There are two independent paths for creating skills:
 
 ### Path 1: Nightly `stepSkillDraft` (03:00 UTC)
 
-Queries: `WHERE importance_score >= 7 AND skill_checked_at IS NULL`
-
-**Status: currently blocked.** All 160 episodes created before migration 010 have `importance_score = 5` (hardcoded fallback). The gate requires >= 7. New episodes created after the migration will score correctly via Haiku at creation time.
-
-Resolution options: (A) backfill scores via Haiku API calls (~$0.01 each), (B) bulk SQL update to 7+, (C) lower threshold temporarily.
+**Status: retired.** `stepSkillDraft` always returns 0 and is no longer invoked (`nightly.ts:481–495`). Skill generation now happens exclusively via Path 2 (Reflection Service).
 
 ### Path 2: Reflection Service
 
@@ -355,7 +351,7 @@ Migrations 001–014 are applied. Key additions:
 
 ### Requirements
 
-- Node.js v18+
+- Node.js v22.12.0+ (required by pg-boss v12)
 - PostgreSQL with TimescaleDB + pgvector (`timescale/timescaledb-ha:pg16` recommended)
 - OpenAI API key (for embeddings)
 - Anthropic API key (for extraction and consolidation)

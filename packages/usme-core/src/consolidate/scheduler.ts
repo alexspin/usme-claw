@@ -4,7 +4,7 @@
  * Uses pg-boss for persistent, DB-backed scheduling.
  */
 
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import Anthropic from "@anthropic-ai/sdk";
 import type pg from "pg";
 import { runNightlyConsolidation, stepEpisodify } from "./nightly.js";
@@ -194,6 +194,10 @@ export async function deliverSkillCandidates(
 
   // Fetch promotable candidates
   const candidates = await getPromoteCandidates({ includeDrafts: false }, pool);
+  log2.info(
+    { count: candidates.length, candidates: candidates.map((c) => ({ id: c.id, name: c.name, confidence: c.confidence })) },
+    "fetched promote candidates",
+  );
 
   if (candidates.length === 0) {
     log2.info("No skill candidates ready for morning delivery");
@@ -202,15 +206,20 @@ export async function deliverSkillCandidates(
 
   // Mark candidates as prompted so they won't appear again tomorrow
   await markCandidatesPrompted(candidates.map((c) => c.id), pool);
+  log2.info({ count: candidates.length }, "marked N candidates as prompted");
 
   // Deliver the card via sendFn if provided, otherwise fire a system event
   const card = buildPromoteCard(candidates);
+  log2.info({ card }, "built promote card");
+
   if (sendFn) {
+    log2.info("delivering via sendFn");
     await sendFn(card);
   } else {
+    log2.info("no sendFn — falling back to execSync openclaw system event");
     const eventText = `[USME-MORNING] ${candidates.length} skill candidate(s) ready for review. Run: npx tsx list-candidates.ts --force`;
     try {
-      execSync(`openclaw system event --text ${JSON.stringify(eventText)} --mode now`, {
+      execFileSync("openclaw", ["system", "event", "--text", eventText, "--mode", "now"], {
         stdio: "inherit",
       });
     } catch (execErr) {
