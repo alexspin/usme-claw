@@ -1,9 +1,9 @@
 # PROMOTE Redesign — Spec & Work Plan
 
 **Date:** 2026-04-10  
-**Status:** Approved for implementation  
+**Status:** Partially implemented — see Implementation Delta at the bottom  
 **Author:** Rufus (PM)  
-**Stage:** DESIGN → BUILD
+**Stage:** SHIPPED (D1 partial, D2 not done, D3 not done, D4 partial)
 
 ---
 
@@ -174,3 +174,31 @@ D1, D2, D3 can all go to Claude Code in a single task. D4 is Rufus-driven verifi
 ## Open Questions
 
 None — all design decisions resolved in session 2026-04-10.
+
+---
+
+## Implementation Delta (as of 2026-04-28)
+
+### D1 — Scripts (usme-core): PARTIALLY DONE
+
+`list-candidates.ts` — ✓ fully implemented. `--include-drafts`, `--force`, `--json` flags all present. `buildPromoteCard()` formats output correctly.
+
+`promote-candidate.ts` — ✓ DB writes implemented (marks `accepted`, inserts into `skills`, sets `promoted_skill_id`, computes embedding, sets `enrichment_status = 'complete'`). **✗ Divergence:** Does NOT fire `openclaw system event` with enrichment prompt. Instead writes a thin scaffold SKILL.md directly using `buildSkillMd()`. The enrichment turn specified in D3 was never wired up. Script treats the scaffold as the final artifact rather than a trigger for a Rufus enrichment turn.
+
+`dismiss-candidate.ts` — ✓ fully implemented. Calls `markCandidateDismissed()`.
+
+### D2 — Plugin command rewrite (usme-openclaw): NOT DONE
+
+`commands/promote.ts` was never created. No `/usme-promote` command is registered in the plugin. Only `/usme-reflect` exists. The promote workflow runs via manual Rufus conversation + direct script invocation.
+
+### D3 — Enrichment prompt rewrite (promote.ts): NOT DONE
+
+`buildEnrichEventText()` does not exist. The four-source enrichment prompt was never written. The current operational model is: Rufus manually performs the four-source enrichment in conversation (per usme-ops SKILL.md SOP), then writes the SKILL.md content directly after user approval. This is a deliberate collaborative-workflow choice rather than an automated LLM call.
+
+### D4 — Build, deploy, verify: PARTIAL
+
+Build and deploy done. The specific verification path (approve candidate "Fix PostgreSQL Transaction Poisoning", observe enrichment turn, confirm SKILL.md on disk) was not completed as written — enrichment turn never fires from the script. Manual promotion sessions work correctly via the Rufus conversation SOP.
+
+### Current Operational Reality
+
+The thin scaffold written by `promote-candidate.ts` is the DB registration step only. Full SKILL.md content creation is handled by Rufus in conversation using the usme-ops promotion SOP: four-source evidence gathering (USME DB + LCM + web + format exemplar) → synthesize content → show to user for approval → write on approval. This matches the spirit of Decision 3 and Decision 5 but skips the automated `buildEnrichEventText()` trigger mechanism.

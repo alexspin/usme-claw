@@ -96,11 +96,17 @@ const EntityUpdateSchema = z.object({
   details: z.unknown(),
 });
 
+const ConstraintSchema = z.object({
+  pattern: z.enum(["NEVER", "STOP_DO", "PREFER", "WARN"]),
+  content: z.string(),
+});
+
 const ReflectionOutputSchema = z.object({
   concept_updates: z.array(ConceptUpdateSchema),
   new_skills: z.array(NewSkillSchema),
   contradictions: z.array(ContradictionSchema),
   entity_updates: z.array(EntityUpdateSchema),
+  new_constraints: z.array(ConstraintSchema).default([]),
   overall_assessment: z.string(),
   candidate_dismissals: z.array(z.object({
     candidate_id: z.number(),
@@ -368,9 +374,16 @@ NOT as a literal multi-line block. If you write actual line breaks inside a JSON
 
 3. **contradictions** — concepts that conflict with each other or with recent episode evidence. Pick the winner based on recency and strength of evidence, not just the confidence score alone. Set winner_concept_id and loser_concept_id to the slugs from their [concept:<slug>] labels.
 
-4. **entity_updates** — add relationships that are clearly established by episode and trace evidence. Skip speculative or one-off associations. Set entity_id to the slug from the [entity:<slug>] label.
+4. **entity_updates** — add a relationship only if it is evidenced by at least 2 distinct traces or episodes in this corpus. Do not add generic "related_to" or "related" edges — only directional verbs: uses, manages, owns, part_of, calls, routes_via, works_at, is_a. Maximum 5 entity_updates per run; return fewer if you cannot find 5 that clear the evidence bar. Set entity_id to the slug from the [entity:<slug>] label.
 
-5. **overall_assessment** — grade the corpus health (A/B/C/D), identify the most important gaps or improvement opportunities, and flag any patterns that should be addressed before the next reflection run.`;
+5. **new_constraints** — behavioral rules and stop-rules extracted from user correction patterns in the trace and episode corpus. Look for:
+   - Repeated explicit corrections: things the user has said "stop doing" or "always do first" more than once
+   - Process rules that came up multiple times (e.g., "assess before coding", "ask before changes")
+   - Failure modes the user flagged as recurring and wants prevented proactively
+   Only include constraints backed by at least 2 separate traces or episodes. Single one-off requests do not qualify. Use [] if nothing clears that bar. Keep each constraint to one short actionable sentence.
+   Pattern meanings: NEVER = hard prohibition, STOP_DO = stop X and do Y instead, PREFER = soft preference, WARN = flag this before proceeding.
+
+6. **overall_assessment** — grade the corpus health (A/B/C/D), identify the most important gaps or improvement opportunities, and flag any patterns that should be addressed before the next reflection run.`;
 
   // ── Phase 3: LLM call ──────────────────────────────────
   const anthropicKey = process.env.ANTHROPIC_API_KEY ?? "";
@@ -453,6 +466,25 @@ NOT as a literal multi-line block. If you write actual line breaks inside a JSON
                 details: { type: "object" },
               },
               required: ["entity_id", "action", "details"],
+            },
+          },
+          new_constraints: {
+            type: "array",
+            description: "Behavioral constraints extracted from user correction patterns. Each constraint is a durable rule the agent must observe. Extract these from: repeated explicit corrections ('stop doing X', 'always do Y first'), process rules that came up more than once, failure modes the user flagged as recurring. Only include constraints backed by at least 2 traces or episodes — not one-off requests. Use [] if none qualify.",
+            items: {
+              type: "object",
+              properties: {
+                pattern: {
+                  type: "string",
+                  enum: ["NEVER", "STOP_DO", "PREFER", "WARN"],
+                  description: "NEVER: hard prohibition. STOP_DO: stop X, do Y instead. PREFER: soft preference. WARN: flag this situation before proceeding.",
+                },
+                content: {
+                  type: "string",
+                  description: "The plain-English constraint text. Keep it short and actionable (one sentence). Example: 'Never run restart-gateway.sh directly from inside the gateway process'",
+                },
+              },
+              required: ["pattern", "content"],
             },
           },
           overall_assessment: { type: "string" },
@@ -846,14 +878,16 @@ NOT as a literal multi-line block. If you write actual line breaks inside a JSON
       try {
         const details = update.details as Record<string, unknown>;
         if (update.action === 'add_relationship') {
+          const relVerb = ((details.relationship ?? 'related') as string).toLowerCase();
           await client2.query(
             `INSERT INTO entity_relationships
                (source_id, target_id, relationship, confidence, valid_from, metadata)
-             VALUES ($1, $2, $3, $4, NOW(), $5)`,
+             VALUES ($1, $2, $3, $4, NOW(), $5)
+             ON CONFLICT (source_id, target_id, relationship, valid_until) DO NOTHING`,
             [
               update.entity_id,
               details.target_entity_id ?? details.target_id ?? update.entity_id,
-              details.relationship ?? 'related',
+              relVerb,
               details.confidence ?? 0.8,
               JSON.stringify({ from_reflection: runId }),
             ],
@@ -877,6 +911,28 @@ NOT as a literal multi-line block. If you write actual line breaks inside a JSON
       } catch (err) {
         await client2.query(`ROLLBACK TO SAVEPOINT ${sp}`);
         log.error({ err, update }, "entity update failed — skipping");
+      }
+    }
+
+    // ── Write new_constraints ────────────────────────────────────────────────
+    const newConstraints = output.new_constraints ?? [];
+    if (newConstraints.length > 0) {
+      const constraintSp = `sp_${spCount++}`;
+      await client2.query(`SAVEPOINT ${constraintSp}`);
+      try {
+        for (const c of newConstraints) {
+          await client2.query(
+            `INSERT INTO constraints (pattern, content)
+             VALUES ($1, $2)
+             ON CONFLICT DO NOTHING`,
+            [c.pattern, c.content],
+          );
+        }
+        await client2.query(`RELEASE SAVEPOINT ${constraintSp}`);
+        log.info({ count: newConstraints.length }, "constraints written");
+      } catch (err) {
+        await client2.query(`ROLLBACK TO SAVEPOINT ${constraintSp}`);
+        log.error({ err }, "constraints write failed — skipping");
       }
     }
 

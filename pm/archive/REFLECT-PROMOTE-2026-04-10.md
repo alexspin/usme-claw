@@ -1,6 +1,9 @@
 # USME Reflect + Promote: Architecture Specification
 _Alex Spinelli · April 10, 2026 · v1_
 
+> **Implementation status (updated 2026-04-28):** Partially implemented. See "Implementation Delta" section at the bottom for what diverged from this spec.
+
+
 ---
 
 ## Overview
@@ -170,3 +173,42 @@ ALTER TABLE skills
 - Per-skill usage analytics (how often a promoted skill is retrieved and used)
 - Batch promotion via CLI (`openclaw usme promote --all`)
 - Hot-loading vs gateway restart on skill registration (spike required before Stage 2 implementation)
+
+---
+
+## Implementation Delta (as of 2026-04-28)
+
+What was built diverges from this spec in the following ways:
+
+### Implemented as specified ✓
+- `skill_candidates` schema columns (`quality_tier`, `prompted_at`, `dismissed_at`, `promoted_skill_id`, `source`, `defer_until`) — all present
+- `skills` schema columns (`promoted_at`, `source_candidate_id`, `generation_notes`) — all present
+- `stepSkillDraft()` retired — no reference in nightly/scheduler
+- Grade quality gate (B+ or above) — implemented in reflect.ts; `isPassing()` in promote.ts
+- Confidence floor (0.5 minimum, 0.5–0.69 = draft, 0.70+ = candidate)
+- `pending_morning_notify` flag set on nighttime reflect runs
+- Morning delivery cron at 17:00 UTC (09:00 Pacific) via `usme-skill-delivery` pg-boss job
+- `pg_trgm` similarity guard (>0.5) for near-duplicate blocking on insert
+
+### Not implemented / diverged ✗
+
+**Enrichment pipeline (the big gap):**
+The enrichment turn specified in steps 1–11 was never built. `promote-candidate.ts` writes a **thin scaffold** SKILL.md directly (with placeholder sections: "To be filled in during enrichment") rather than firing a system event that triggers a full Rufus agent turn with 4-source evidence gathering.
+
+`buildEnrichEventText()` in promote.ts does not exist. The script instead calls `getEnrichContext()` to pull DB metadata and uses that to populate a scaffold template only.
+
+**Post-reflect daytime signal:**
+Spec says: fire `usme:candidates-ready:{runId}` system event immediately when daytime + new candidates.
+Reality: reflect.ts logs "daytime — caller will deliver candidates-ready notification" but does NOT fire the event. The `sendFn` path in `deliverSkillCandidates()` is what actually fires the notification — but that runs at 17:00 UTC on the `usme-skill-delivery` cron, not immediately post-reflect.
+
+**`/usme-promote` plugin command:**
+Spec says: register `usme:promote` command handler + `usme:candidates-ready:*` system event handler.
+Reality: only `/usme-reflect` is registered. No `/usme-promote` command exists in the plugin.
+
+**`commands/promote.ts`:**
+The `usme-openclaw` package has `commands/reflect.ts` only. The promote command file was never created.
+
+### What to do about it
+The enrichment gap is deliberate (confirmed 2026-04-28): Rufus manually enriches candidates in conversation using the four-source method described in the usme-ops SKILL.md. The `promote-candidate.ts` script handles the DB/file scaffolding; Rufus handles the content enrichment. This is the current operational workflow.
+
+The `/usme-promote` command and daytime post-reflect signal are genuine P2 items — useful but not blocking.

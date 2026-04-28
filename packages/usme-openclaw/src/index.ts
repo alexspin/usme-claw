@@ -58,31 +58,44 @@ export function extractText(content: unknown): string {
 }
 
 /** Convert InjectedMemory[] items into a system prompt addition. */
-export function injectedToSystemAddition(items: InjectedMemory[]): string {
-  if (items.length === 0) return "";
-  const lines: string[] = [];
-  for (const item of items) {
-    const dateStr = item.createdAt instanceof Date
-      ? item.createdAt.toISOString().slice(0, 10)
-      : String(item.createdAt).slice(0, 10);
-    const relevance = item.score >= 0.75 ? "high" : item.score >= 0.50 ? "med" : "low";
-    let header = `[${item.tier} | ${dateStr} | relevance:${relevance}`;
-    if (item.tags && item.tags.length > 0) {
-      header += ` | tags:${item.tags.join(",")}`;
-    }
-    header += "]";
-    lines.push(header);
-    lines.push(item.content);
-    lines.push("");
+export function injectedToSystemAddition(
+  items: InjectedMemory[],
+  constraintLines?: string[],
+): string {
+  if (items.length === 0 && (!constraintLines || constraintLines.length === 0)) return "";
+
+  const parts: string[] = ["<usme-context>"];
+
+  if (constraintLines && constraintLines.length > 0) {
+    parts.push("[constraints]");
+    parts.push(...constraintLines);
+    parts.push("");
   }
-  if (lines[lines.length - 1] === "") lines.pop();
-  return [
-    "<usme-context>",
-    "Relevant memories retrieved for this turn:",
-    "",
-    ...lines,
-    "</usme-context>",
-  ].join("\n");
+
+  if (items.length > 0) {
+    parts.push("Relevant memories retrieved for this turn:");
+    parts.push("");
+    const lines: string[] = [];
+    for (const item of items) {
+      const dateStr = item.createdAt instanceof Date
+        ? item.createdAt.toISOString().slice(0, 10)
+        : String(item.createdAt).slice(0, 10);
+      const relevance = item.score >= 0.75 ? "high" : item.score >= 0.50 ? "med" : "low";
+      let header = `[${item.tier} | ${dateStr} | relevance:${relevance}`;
+      if (item.tags && item.tags.length > 0) {
+        header += ` | tags:${item.tags.join(",")}`;
+      }
+      header += "]";
+      lines.push(header);
+      lines.push(item.content);
+      lines.push("");
+    }
+    if (lines[lines.length - 1] === "") lines.pop();
+    parts.push(...lines);
+  }
+
+  parts.push("</usme-context>");
+  return parts.join("\n");
 }
 
 export const id = "usme-claw";
@@ -302,12 +315,30 @@ export default function usmePlugin(api: {
         _spreadingMetrics = (result.metadata as { spreadingMetrics?: { entitiesMatched: number; episodesAdded: number; spreadDepth: number } }).spreadingMetrics;
         log.debug({ itemsSelected, itemsConsidered, tiersQueried, tokensInjected, spreadingEpisodesAdded: _spreadingMetrics?.episodesAdded ?? 0 }, "[usme] coreAssemble OK");
 
-        if (result.items.length > 0) {
-          contextBlock = injectedToSystemAddition(result.items);
+        // ── Load active constraints (outside token budget) ────────────────────────
+        let constraintLines: string[] = [];
+        try {
+          const { rows: activeConstraints } = await pool.query(
+            `SELECT pattern, content FROM constraints
+             WHERE dismissed_at IS NULL
+             ORDER BY created_at DESC
+             LIMIT 10`,
+          );
+          constraintLines = activeConstraints.map(
+            (r: { pattern: string; content: string }) => `${r.pattern}: ${r.content}`,
+          );
+        } catch (constraintErr) {
+          log.warn({ err: constraintErr }, "[usme] constraints query failed (non-fatal)");
+        }
+
+        if (result.items.length > 0 || constraintLines.length > 0) {
+          contextBlock = injectedToSystemAddition(result.items, constraintLines);
           log.debug({ contextBlockLength: contextBlock.length }, "[usme] contextBlock built");
-          void bumpAccessCounts(pool, result.items).catch((err: unknown) => {
-            logger.warn({ err }, "[usme] bumpAccessCounts failed (non-fatal)");
-          });
+          if (result.items.length > 0) {
+            void bumpAccessCounts(pool, result.items).catch((err: unknown) => {
+              logger.warn({ err }, "[usme] bumpAccessCounts failed (non-fatal)");
+            });
+          }
         } else {
           log.debug("[usme] result.items empty — contextBlock will be empty");
         }
