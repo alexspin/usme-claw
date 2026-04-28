@@ -9,6 +9,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { Pool } from "pg";
 import { logger } from "../logger.js";
 import { GRAPH_BUILDER_CONFIG } from "./reflect-config.js";
+import { DEFAULT_REASONING_MODEL } from "../config/models.js";
 import { makeSlug, assignSlug } from "./reflect-corpus.js";
 import { buildGraphBuilderPrompt } from "./reflect-prompts.js";
 
@@ -48,7 +49,7 @@ interface ProposedRelationship {
 
 export async function runGraphBuilder(opts: GraphBuilderOptions): Promise<GraphBuildResult> {
   const start = Date.now();
-  const model = opts.model ?? "claude-sonnet-4-5";
+  const model = opts.model ?? DEFAULT_REASONING_MODEL;
 
   const databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl) throw new Error("DATABASE_URL not set — cannot run graph builder");
