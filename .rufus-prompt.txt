@@ -1,205 +1,317 @@
-You are working on the USME memory system located at:
-  /home/alex/ai/projects/rufus-projects/usme-claw/
+Use the ruflo MCP swarm to implement candidate-aware deduplication in the USME reflection pipeline (reflect.ts).
 
-The reflect-promote pipeline was implemented last night (commits 5660fef + 6eba839) and is
-architecturally correct but has 4 bugs preventing it from functioning end-to-end. No skills have
-ever reached the `skill_candidates` table despite 4 reflection runs completing. Your job is to
-fix all four bugs, migrate existing data, and verify the full pipeline works.
+Environment notes:
+- Working directory: /home/alex/ai/projects/rufus-projects/usme-claw/
+- This repo already has git configured — do NOT run git init
+- Node: v25.8.1, PostgreSQL: localhost:5432, db/user=usme, password=usme_dev
+- DB container name: usme-db (connect via: docker exec -i usme-db psql -U usme -d usme)
+- pg_trgm extension is NOT currently installed — must be enabled via migration
+- Next migration number is 016 (migrations 001–015 already exist in packages/usme-core/db/migrations/)
+- Existing test baseline: reflect.test.ts ✓ all pass, reflect.quality-gate.test.ts ✓ all pass
+- Pre-existing failures (NOT ours, do not touch): dedup-check.test.ts ×2, queue.test.ts ×7, spread.test.ts ×4
 
-───────────────────────────────────────────────────────────────────────────────
-MANDATORY READ BEFORE WRITING ANY CODE
-───────────────────────────────────────────────────────────────────────────────
+---
 
-Read these files in order. Do not skip any of them:
+MANDATORY STARTUP — your very first response must do all three of these things
+at once, in a single message. Do not split them across multiple messages or the
+agents will run one at a time instead of in parallel.
 
-1. pm/SWARM-ISSUES.md           ← the 4 bugs, root causes, and exact fixes
-2. pm/REFLECT-PROMOTE.md        ← the full spec for what was built
-3. pm/STATUS.md                 ← current system state
-4. docs/ARCHITECTURE.md         ← package layout, data flow, build system
-5. docs/DECISIONS.md            ← why things are the way they are
-6. packages/usme-core/src/consolidate/reflect.ts        ← reflection pipeline
-7. packages/usme-core/src/consolidate/promote.ts        ← extractGrade, isPassing, DB fns
-8. packages/usme-core/src/consolidate/scheduler.ts      ← crons, deliverSkillCandidates
-9. packages/usme-openclaw/src/index.ts                  ← morning cron handler, API surface
-10. packages/usme-openclaw/src/commands/promote.ts      ← CLI command
-11. packages/usme-core/db/migrations/014_skill_candidates_promote.sql  ← schema
-12. packages/usme-core/tests/unit/promote.test.ts       ← existing tests
+1. Initialize the swarm using the ruflo MCP tool (swarm_init), with hierarchical
+   topology, 8 agents max, and specialized strategy.
 
-───────────────────────────────────────────────────────────────────────────────
-AGENT ROLES AND SEQUENCING
-───────────────────────────────────────────────────────────────────────────────
+2. Create a todo list with all agent tasks in one batch — one TodoWrite call
+   covering every agent.
 
-ARCHITECT runs first. When done, post: done:architect
+3. Spawn every agent at the same time using the Task tool, each with
+   run_in_background set to true. All Task calls go in this same first message.
 
-CODER waits for done:architect, then implements. When done, post: done:coder
+---
 
-QA and TESTER run in parallel after done:coder.
+DASHBOARD OBSERVABILITY — mandatory for every agent, no exceptions:
 
-───────────────────────────────────────────────────────────────────────────────
-ARCHITECT TASK
-───────────────────────────────────────────────────────────────────────────────
+Before starting:
+  memory_store("plan:<agent-name>", "<what I'll do> | <files I'll create> | ~<N> min")
 
-Read all 12 files listed above. Then write a concise design doc to:
-  docs/SWARM-FIX-DESIGN.md
+After completing:
+  memory_store("done:<agent-name>", "<one line: what changed>")
 
-The design doc must cover:
+Only if blocked:
+  memory_store("blocked:<agent-name>", "<what's blocking me>")
 
-1. **Bug 1 — extractGrade regex fix**
-   - Confirm the current regex and why it fails on `"**Corpus Health: B+**"`
-   - Specify the exact replacement regex or parsing approach
-   - Confirm it handles: plain `"B+"`, `"A-/B+ grade"`, `"**B+**"`, `"Corpus Health: B+"`
-   - Confirm `isPassing()` set is correct: {A+, A, A-, B+}
+Examples:
+  memory_store("plan:coder",     "read reflect.ts, write migration 016, update reflect.ts | 3 files | ~20 min")
+  memory_store("done:coder",     "migration 016 written, reflect.ts updated with candidate fetch + dismissal flow")
+  memory_store("plan:tester",    "write reflect.dedup.test.ts covering all new behavior | 1 file | ~15 min")
+  memory_store("done:tester",    "reflect.dedup.test.ts: 7 new tests, all pass")
+  memory_store("blocked:tester", "waiting for done:coder")
 
-2. **Bug 2 — UNIQUE constraint vs partial index**
-   - Check whether `ON CONFLICT (name) DO NOTHING` resolves against a partial index in PG15
-   - Specify whether a full UNIQUE constraint needs to be added (and via migration or ALTER TABLE)
-   - Check if the existing 21 rows in `skills` will cause FK problems at promote time
+---
 
-3. **Bug 3 — Data migration**
-   - Specify the exact SQL to move 21 `skills` rows with `status='candidate'` and
-     `source_candidate_id IS NULL` into `skill_candidates`
-   - Specify the column mapping: teachability → confidence, set quality_tier, source, etc.
-   - Specify cleanup: DELETE those rows from `skills` after migration
-   - Decide: should this be a new migration file (015) or a one-time script?
+BACKGROUND
 
-4. **Bug 4 — Morning notification delivery**
-   - Trace `deliverSkillCandidates()` in scheduler.ts to see how it currently outputs the card
-   - Trace how the morning cron in index.ts calls it
-   - Identify what OpenClaw plugin API surface is available for user-facing message delivery
-     (look at api.* methods available in the register function)
-   - Specify the correct delivery mechanism
+The USME reflection pipeline (reflect.ts) runs twice daily and proposes new skill
+candidates into the skill_candidates table. The problem: it never looks at what's
+already pending — it only checks the skills table (which is currently empty). After
+158 candidates have accumulated, the table is full of near-duplicates like
+"Fix PostgreSQL Transaction Cascade Errors", "Handle PostgreSQL Savepoint Poisoning",
+"Debug PostgreSQL Nested Transaction Failures" — all the same pattern, proposed again
+on every reflection run.
 
-5. **Test plan** — what tests to add/modify for each fix
+Three changes are needed. They must be implemented cleanly with tests written before
+the implementation is considered done.
 
-───────────────────────────────────────────────────────────────────────────────
-CODER TASK
-───────────────────────────────────────────────────────────────────────────────
+---
 
-Wait for done:architect. Read docs/SWARM-FIX-DESIGN.md. Then implement exactly what the
-architect specified.
+REQUIREMENTS
 
-**Fix 1 — promote.ts: extractGrade()**
-- Update the regex so it finds the grade letter anywhere in the string
-- Preserve the existing function signature and return type
-- Do not break any passing tests
+**Change 1 — Migration 016: Enable pg_trgm and add similarity index**
 
-**Fix 2 — UNIQUE constraint (if architect confirms needed)**
-- Add migration 015 if a schema change is required
-- Run migration: `DATABASE_URL=postgres://usme:usme_dev@localhost:5432/usme npm run migrate`
-  from `packages/usme-core/`
+pg_trgm is a standard Postgres extension that scores string similarity by comparing
+trigrams. It ships with every standard Postgres install.
 
-**Fix 3 — Data migration**
-- Write and run the SQL to migrate 21 pre-swarm skills → skill_candidates
-- Write and run the cleanup DELETE
-- Verify: `SELECT count(*) FROM skill_candidates` should be 21
-- Verify: `SELECT count(*) FROM skills WHERE status='candidate' AND source_candidate_id IS NULL`
-  should be 0
+Create file: packages/usme-core/db/migrations/016_pg_trgm.sql
 
-**Fix 4 — Morning notification delivery**
-- Update scheduler.ts and/or index.ts so the morning card reaches the user's session
-- If `api` is not accessible inside scheduler.ts, the correct pattern is to return the card
-  text from `deliverSkillCandidates()` and have the caller in index.ts use the api to send it
+Contents:
+- CREATE EXTENSION IF NOT EXISTS pg_trgm;
+- CREATE INDEX IF NOT EXISTS idx_skill_candidates_name_trgm
+    ON skill_candidates USING gin (name gin_trgm_ops)
+    WHERE dismissed_at IS NULL;
 
-**After all fixes:**
-Build and verify:
-```bash
-cd packages/usme-openclaw && npm run build
-```
-Build must succeed. Then run tests:
-```bash
-cd packages/usme-core && npm test
-```
-All tests must pass (one pre-existing NaN failure in nightly.skill.test.ts is acceptable).
+Migration must be idempotent (IF NOT EXISTS on both statements).
+Do NOT add this migration to any auto-run list — user applies migrations manually.
 
-Do not commit until QA signals clear.
+**Change 2 — Corpus fetch: inject active candidates into prompt**
 
-───────────────────────────────────────────────────────────────────────────────
-QA TASK
-───────────────────────────────────────────────────────────────────────────────
+In runReflection() in packages/usme-core/src/consolidate/reflect.ts:
 
-Wait for done:coder. Validate against pm/SWARM-ISSUES.md and pm/REFLECT-PROMOTE.md.
+The corpus fetch phase currently queries:
+  SELECT name FROM skills WHERE status = 'active'
+to tell the LLM "these skills already exist, don't duplicate them".
 
-1. **Test extractGrade with all known formats:**
-   ```
-   extractGrade("**Corpus Health: B+**\n\nStrengths:...")  → "B+"
-   extractGrade("Memory corpus health: A-/B+ grade...")    → "A-"
-   extractGrade("**Memory Corpus Health: B+ (Improved)**") → "B+"
-   extractGrade("Corpus Health: A")                       → "A"
-   extractGrade("D - poor corpus")                        → "D"
-   extractGrade("")                                       → ""
-   ```
+Add a 6th query immediately after:
+  SELECT id, name, description FROM skill_candidates
+  WHERE dismissed_at IS NULL
+  ORDER BY created_at DESC
 
-2. **Verify skill_candidates has 21 rows, skills has 0 candidates:**
-   ```sql
-   SELECT count(*) FROM skill_candidates;                          -- should be 21
-   SELECT count(*) FROM skills WHERE status='candidate';           -- should be 0
-   SELECT count(*) FROM skill_candidates WHERE quality_tier='candidate';  -- should be ~21
-   ```
+Both lists must be injected into the LLM prompt with distinct labels:
 
-3. **Run a fresh reflection to verify Bug 1 fix works end-to-end:**
-   ```bash
-   cd packages/usme-core && \
-   DATABASE_URL=postgres://usme:usme_dev@localhost:5432/usme \
-   ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY \
-   OPENAI_API_KEY=$OPENAI_API_KEY \
-   npx tsx run-consolidation.mts
-   ```
-   Wait for completion (~2-3 min). Then check:
-   ```sql
-   SELECT count(*) FROM skill_candidates;  -- should be > 21 if grade passes
-   SELECT count(*) FROM reflection_runs ORDER BY id DESC LIMIT 1;
-   ```
-   If grade was B+ or above, skill_candidates should have gained new rows.
+  Active skills (already promoted — do NOT reproduce these):
+  [list]
 
-4. **Test /usme-promote (after build and gateway restart):**
-   Run `/usme-promote` in the OpenClaw TUI. It should return a formatted candidate card, not
-   "No candidates ready" (since we now have 21 rows in skill_candidates).
+  Pending review queue (already in the candidate backlog — do NOT propose near-duplicates of these):
+  [list with id, name, description]
 
-5. **Check tests pass:** `cd packages/usme-core && npm test`
+If the candidates list is empty, inject a placeholder: "(none yet)" — do not crash or skip
+the section.
 
-6. **Check build is clean:** `cd packages/usme-openclaw && npm run build`
+**Change 3 — Output schema: add candidate_dismissals + response handler**
 
-Report findings in docs/SWARM-FIX-QA.md. If anything fails, fix it before signaling done.
-Post: done:qa
+The reflection tool schema currently has four arrays:
+  concept_updates, new_skills, contradictions, entity_updates
 
-───────────────────────────────────────────────────────────────────────────────
-TESTER TASK
-───────────────────────────────────────────────────────────────────────────────
+Add a fifth:
+  candidate_dismissals: array of { candidate_id: number, reason: string }
 
-Wait for done:coder. Add unit tests to `packages/usme-core/tests/unit/promote.test.ts`
-covering the cases QA checks manually in step 1 above, plus:
+Valid dismissal reasons (include these in the prompt as guidance):
+  - "too specific: single incident, will not recur"
+  - "duplicate: covered by [candidate name]"
+  - "micro-pattern: not generalizable across domains"
 
-- `isPassing("B+")` → true
-- `isPassing("B")` → false
-- `isPassing("C+")` → false
-- `isPassing("")` → false
-- `extractGrade` with at least 5 different real Sonnet output formats
+In the response handler, process candidate_dismissals BEFORE new_skills:
+  - For each entry, run:
+      UPDATE skill_candidates
+      SET dismissed_at = NOW(), updated_at = NOW()
+      WHERE id = $1
+  - Wrap in the same SAVEPOINT isolation pattern already used for concept_updates
+    (SAVEPOINT before, RELEASE SAVEPOINT after success, ROLLBACK TO SAVEPOINT on error)
+  - Log how many were dismissed: "Dismissed N candidates"
+  - Include dismissalsProcessed count in the returned result object
 
-Run tests: `cd packages/usme-core && npm test`
-All tests must pass. Post: done:tester
+**Change 4 — pg_trgm similarity guard at insert time**
 
-───────────────────────────────────────────────────────────────────────────────
-BUILD AND COMMIT (CODER, after done:qa and done:tester)
-───────────────────────────────────────────────────────────────────────────────
+Before each INSERT INTO skill_candidates for a proposed new skill, run a pre-check:
+  SELECT id, name FROM skill_candidates
+  WHERE dismissed_at IS NULL
+  AND similarity(name, $1) > 0.5
+  ORDER BY similarity(name, $1) DESC
+  LIMIT 1
 
-```bash
-cd packages/usme-openclaw && npm run build
-cd /home/alex/ai/projects/rufus-projects/usme-claw
-git add -A
-git commit -m "fix: reflect-promote pipeline — grade extraction, data migration, notification delivery"
-```
+If a row is returned: skip the INSERT, log the skip:
+  "Skipping '[proposed name]' — too similar to existing candidate '[existing name]' (trgm guard)"
 
-Do NOT push. Leave that for Rufus.
+If no row: proceed with INSERT as normal.
 
-───────────────────────────────────────────────────────────────────────────────
-ENVIRONMENT
-───────────────────────────────────────────────────────────────────────────────
+This is the last-resort guard for LLM misses. The ON CONFLICT (name) DO NOTHING
+safety catch must stay in place too.
 
-- Node: v25.8.1
-- PostgreSQL: localhost:5432, db=usme, user=usme, password=usme_dev
-- ANTHROPIC_API_KEY: available in environment
-- OPENAI_API_KEY: available in environment
-- Build: `npm run build` from packages/usme-openclaw/
-- Test: `npm test` from packages/usme-core/
-- Migrate: `DATABASE_URL=postgres://usme:usme_dev@localhost:5432/usme npm run migrate`
-  from packages/usme-core/
+---
+
+PRESERVE ALL EXISTING BEHAVIOR
+
+These must not change:
+- Quality gate: grade B+ or above required (isPassing() check) before writing any candidates
+- Confidence threshold: ≥0.5 to write, ≥0.7 for quality_tier='candidate', <0.7 for 'draft'
+- SAVEPOINT isolation: one savepoint per operation type (concept_updates, new_skills, contradictions, entity_updates)
+- dry-run: no DB writes at all, returns runId=-1
+- ON CONFLICT (name) DO NOTHING safety catch on the INSERT
+- All existing tests in reflect.test.ts and reflect.quality-gate.test.ts must stay green
+
+---
+
+AGENT INSTRUCTIONS
+
+Log all decisions to swarm memory namespace "reflect-dedup".
+
+coordinator:
+  Run: npx claude-flow@v3alpha hooks session-start
+  Gate coder on ready. Gate tester on done:coder. Gate qa-reviewer on done:tester.
+  Do not allow any agent to proceed without posting their plan: key first.
+  If any agent posts a blocked: key, surface it immediately and resolve before continuing.
+
+coder:
+  Poll memory for coordinator ready signal before starting.
+
+  Read these files in full before writing a single line:
+    - packages/usme-core/src/consolidate/reflect.ts  (understand current structure end to end)
+    - packages/usme-core/tests/unit/reflect.test.ts  (understand existing test patterns)
+    - packages/usme-core/tests/unit/reflect.quality-gate.test.ts
+    - packages/usme-core/db/migrations/ (list all, confirm 016 is the next number)
+
+  Implement all four changes from REQUIREMENTS above, in this order:
+    1. Write packages/usme-core/db/migrations/016_pg_trgm.sql
+    2. Update reflect.ts: add 6th corpus query, update prompt injection, add Zod field
+       for candidate_dismissals, add dismissals handler with SAVEPOINT, add trgm guard
+       before each candidate INSERT
+
+  After implementing, run existing tests to confirm zero regressions:
+    cd packages/usme-core && npx vitest run tests/unit/reflect.test.ts tests/unit/reflect.quality-gate.test.ts
+
+  Do NOT fix dedup-check.test.ts, queue.test.ts, or spread.test.ts failures — pre-existing, out of scope.
+  Do NOT run npm run build — tester will confirm tests, qa-reviewer will do the final check.
+
+tester:
+  Poll memory for done:coder before starting.
+
+  Write: packages/usme-core/tests/unit/reflect.dedup.test.ts
+
+  Use the exact same mock pattern as the existing reflect test files:
+    - vi.mock("@anthropic-ai/sdk", ...) with mockMessagesCreate
+    - vi.mock("../../src/db/pool.js", ...) with mockQuery + mockConnect + mockClient
+    - beforeEach resets all mocks, sets ANTHROPIC_API_KEY, sets up mockConnect
+    - makeReflectionResponse() helper returns the tool_use structure
+
+  Cover all of the following (one test per behavior):
+
+  1. Candidate corpus fetch: mock pool.query to return rows for the candidates query
+     (SELECT id, name, description FROM skill_candidates WHERE dismissed_at IS NULL).
+     Verify that runReflection() calls pool.query with a SQL string containing
+     "skill_candidates" and "dismissed_at IS NULL" at some point during corpus fetch.
+
+  2. Prompt contains candidates section: capture the prompt string passed to
+     mockMessagesCreate. When candidates exist, verify the prompt contains both
+     "Pending review queue" (or equivalent label) and the candidate name.
+
+  3. Prompt empty candidates: when candidates query returns [], verify the prompt
+     contains a graceful placeholder like "(none yet)" — no crash.
+
+  4. candidate_dismissals processed: mock LLM returning
+     candidate_dismissals: [{ candidate_id: 5, reason: "too specific: single incident, will not recur" }]
+     Verify mockClient.query was called with SQL containing "UPDATE skill_candidates"
+     and "dismissed_at". Verify a SAVEPOINT was set before the UPDATE.
+     Verify the result object includes dismissalsProcessed: 1.
+
+  5. candidate_dismissals empty array: LLM returns candidate_dismissals: [].
+     Verify no UPDATE is issued. No crash. result.dismissalsProcessed === 0.
+
+  6. candidate_dismissals missing from response: LLM omits the field entirely.
+     Verify it is treated as [] — no crash, no UPDATE.
+
+  7. trgm guard — near-duplicate found: before the INSERT for a new skill candidate,
+     pool.query (or mockClient.query) returns a row from the similarity check.
+     Verify INSERT INTO skill_candidates is NOT called for that skill.
+     Verify result.changes.skillsCreated does NOT count the skipped skill.
+
+  8. trgm guard — no near-duplicate: similarity check returns empty rows.
+     Verify INSERT INTO skill_candidates IS called normally.
+
+  9. dry-run with dismissals: LLM returns candidate_dismissals: [{ candidate_id: 3, reason: "..." }].
+     Verify dry-run still makes no DB writes (mockConnect not called,
+     mockClient.query not called). result.runId === -1.
+
+  Run all reflect tests after writing:
+    cd packages/usme-core && npx vitest run tests/unit/reflect.test.ts tests/unit/reflect.quality-gate.test.ts tests/unit/reflect.dedup.test.ts
+
+  All must pass. Report the exact count in your done: key.
+
+qa-reviewer:
+  Poll memory for done:tester before starting.
+
+  Your job is end-to-end correctness verification, not just confirming tests pass.
+
+  Check each of the following explicitly — do not skim:
+
+  1. Migration file: does 016_pg_trgm.sql exist? Is it numbered correctly (no gaps
+     after 015, no collision)? Are both statements idempotent (IF NOT EXISTS)?
+
+  2. Corpus fetch: read reflect.ts. Confirm the 6th query fetches from skill_candidates
+     WHERE dismissed_at IS NULL. Confirm it is called after the 5th query (skills),
+     not instead of it.
+
+  3. Prompt injection: read the actual prompt string construction in reflect.ts.
+     Confirm both sections exist with distinct labels. Confirm the empty-candidates
+     case produces a sensible placeholder, not a crash or blank.
+
+  4. Zod schema: confirm candidate_dismissals is defined in the Zod schema for
+     reflection_output as an array (z.array(...)). Confirm it defaults to [] if absent
+     (use .default([]) or .optional() — whichever ensures the handler never sees undefined).
+
+  5. Dismissals handler: confirm it runs BEFORE new_skills in the response handler.
+     Confirm SAVEPOINT/RELEASE pattern matches the existing patterns in the file.
+     Confirm dismissed count is in the returned result object.
+
+  6. trgm guard: confirm the pre-check query uses similarity() from pg_trgm, checks
+     dismissed_at IS NULL, uses threshold 0.5, and runs before each candidate INSERT.
+     Confirm skipped candidates are logged (not silent).
+
+  7. Regression check — run the full reflect suite:
+       cd packages/usme-core && npx vitest run tests/unit/reflect.test.ts tests/unit/reflect.quality-gate.test.ts tests/unit/reflect.dedup.test.ts
+     Confirm all pass. Report the exact count.
+
+  8. Read reflect.ts in full after all changes. Flag any dead code, leftover TODOs,
+     or commented-out blocks that shouldn't be there.
+
+  Write your findings to:
+    packages/usme-core/QA_REFLECT_DEDUP.md
+
+  Format:
+    ## Migration
+    ## Corpus fetch
+    ## Prompt injection
+    ## Zod schema
+    ## Dismissals handler
+    ## trgm guard
+    ## Test results
+    ## Final verdict (PASS / FAIL with reason)
+
+---
+
+After all agents complete:
+
+1. Run full workspace test suite:
+     cd /home/alex/ai/projects/rufus-projects/usme-claw && npm test 2>&1 | tail -30
+
+2. Confirm:
+   - reflect.test.ts ✓ all passing
+   - reflect.quality-gate.test.ts ✓ all passing
+   - reflect.dedup.test.ts ✓ all passing (9 tests)
+   - dedup-check.test.ts: still same 2 failures as before (pre-existing, not regressed)
+   - queue.test.ts: still same 7 failures as before (pre-existing, not regressed)
+
+BEFORE committing, scan for secrets:
+  git diff --staged | grep -iE '(AIza[A-Za-z0-9_-]{30,}|[0-9]{10}:AA[A-Za-z0-9_-]{30,}|ghp_[A-Za-z0-9]{36,}|sk-[A-Za-z0-9_-]{32,}|PRIVATE KEY|BEGIN EC PRIVATE|bearer [a-zA-Z0-9_-]{20,})'
+If any match found: DO NOT COMMIT. Stop and report immediately.
+
+git add -A && git commit -m "feat(reflect): candidate-aware dedup — prompt injection, dismissal flow, pg_trgm guard"
+
+Do not touch .openclaw/, node_modules/, or workspace root.
+Do NOT run git init — already configured.
