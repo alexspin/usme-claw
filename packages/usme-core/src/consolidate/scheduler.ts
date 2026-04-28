@@ -10,6 +10,7 @@ import { runNightlyConsolidation, stepEpisodify } from "./nightly.js";
 import type { NightlyConfig, NightlyResult } from "./nightly.js";
 import { getPgBoss } from "../extract/pgboss.js";
 import { runReflection } from "./reflect.js";
+import { runGraphBuilder } from "./graph-builder.js";
 import {
   getPromoteCandidates,
   buildPromoteCard,
@@ -111,6 +112,8 @@ export async function startScheduler(
         log.info({ candidatesCreated: result.candidatesCreated }, "reflection produced candidates — delivering now");
         await deliverSkillCandidates(pool, config.sendFn);
       }
+      const graphResult = await runGraphBuilder({ triggerSource: "scheduler-morning" });
+      log.info({ graphResult }, "graph build complete");
     } catch (err) {
       log.error({ err }, "scheduled reflection (morning) failed");
     }
@@ -123,6 +126,8 @@ export async function startScheduler(
       if (result.candidatesCreated > 0) {
         log.info({ candidatesCreated: result.candidatesCreated }, "reflection produced candidates — scheduling morning delivery via flag");
       }
+      const graphResult = await runGraphBuilder({ triggerSource: "scheduler-evening" });
+      log.info({ graphResult }, "graph build complete");
     } catch (err) {
       log.error({ err }, "scheduled reflection (evening) failed");
     }
