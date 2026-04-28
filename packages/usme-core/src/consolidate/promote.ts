@@ -66,7 +66,7 @@ export function isPassing(grade: string): boolean {
  * e.g. "B+ — memory health is good..." → "B+"
  */
 export function extractGrade(overallAssessment: string): string {
-  const m = overallAssessment.match(/\b([A-D][+\-]?)(?=\b|\*|\/|\s|$)/i);
+  const m = overallAssessment.match(/\b([A-D][+\-]?)(?!\w)/i);
   return m ? m[1] : "";
 }
 

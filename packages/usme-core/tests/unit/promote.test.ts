@@ -10,6 +10,8 @@ describe("extractGrade", () => {
     expect(extractGrade("Grade A- for overall quality")).toBe("A-"));
   it("returns first match on A-/B+", () =>
     expect(extractGrade("A-/B+")).toBe("A-"));
+  it("handles grade followed by period", () =>
+    expect(extractGrade("B+. The corpus is large")).toBe("B+"));
   it("returns empty string for empty input", () =>
     expect(extractGrade("")).toBe(""));
 });

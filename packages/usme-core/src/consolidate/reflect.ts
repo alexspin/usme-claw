@@ -137,6 +137,8 @@ export async function runReflection(opts: ReflectionOptions): Promise<Reflection
      ORDER BY utility_score DESC`,
   );
 
+  const conceptIdSet = new Set<string>(concepts.map((c: { id: string }) => c.id));
+
   const { rows: episodes } = await pool.query(
     `SELECT id, summary, access_count, importance_score, utility_score, created_at
      FROM episodes
@@ -198,21 +200,19 @@ export async function runReflection(opts: ReflectionOptions): Promise<Reflection
   }
 
   // ── Phase 2: Build prompt ──────────────────────────────
-  const conceptsText = concepts
-    .map((c: { id: string; concept_type: string; content: string; utility_score: number; confidence: number }) =>
-      `[concept:${c.id}] (${c.concept_type}, util=${c.utility_score.toFixed(2)}, conf=${c.confidence.toFixed(2)}) ${c.content}`)
-    .join("\n");
 
-  // Build a slug→UUID map so the LLM gets short memorable keys instead of 36-char UUIDs.
-  // The LLM selects from [ep:<slug>] labels it actually sees in the corpus, then we remap
-  // slugs back to real UUIDs before DB insertion. Avoids the working-memory recall problem
-  // that caused the LLM to invent integers when asked to cite UUIDs from 90K+ tokens back.
+  // Build slug→UUID maps so the LLM gets short memorable keys instead of 36-char UUIDs.
+  // The LLM uses [concept:<slug>], [ep:<slug>], and [entity:<slug>] labels from the corpus,
+  // then we remap those slugs back to real UUIDs before DB insertion. Avoids the working-memory
+  // recall problem that caused the LLM to invent or hallucinate UUIDs from 90K+ tokens back.
   const episodeSlugIndex = new Map<string, string>(); // slug → uuid
-  const slugCounts = new Map<string, number>();        // for collision dedup
+  const conceptSlugIndex = new Map<string, string>(); // slug → uuid
+  const entitySlugIndex  = new Map<string, string>(); // slug → uuid
+  const slugCounts = new Map<string, number>();        // for collision dedup across all namespaces
 
-  function makeSlug(summary: string): string {
+  function makeSlug(text: string, fallback = 'item'): string {
     // Take first 6 meaningful words, kebab-case, max 40 chars
-    const slug = summary
+    const slug = text
       .toLowerCase()
       .replace(/[^a-z0-9\s-]/g, '')
       .trim()
@@ -221,30 +221,53 @@ export async function runReflection(opts: ReflectionOptions): Promise<Reflection
       .join('-')
       .slice(0, 40)
       .replace(/-+$/, '');
-    return slug || 'episode';
+    return slug || fallback;
   }
+
+  function assignSlug(text: string, index: Map<string, string>, uuid: string, ns: string): string {
+    let base = makeSlug(text, ns);
+    // namespace slug counts per index to avoid cross-namespace collisions in the prompt
+    const key = `${ns}:${base}`;
+    const count = (slugCounts.get(key) ?? 0) + 1;
+    slugCounts.set(key, count);
+    const slug = count > 1 ? `${base}-${count}` : base;
+    index.set(slug, uuid);
+    return slug;
+  }
+
+  const conceptsText = concepts
+    .map((c: { id: string; concept_type: string; content: string; utility_score: number; confidence: number }) => {
+      const slug = assignSlug(c.content, conceptSlugIndex, c.id, 'concept');
+      return `[concept:${slug}] (${c.concept_type}, util=${c.utility_score.toFixed(2)}, conf=${c.confidence.toFixed(2)}) ${c.content}`;
+    })
+    .join("\n");
 
   const episodesText = episodes
     .map((e: { id: string; summary: string; access_count: number; importance_score: number }) => {
-      let slug = makeSlug(e.summary);
-      const count = (slugCounts.get(slug) ?? 0) + 1;
-      slugCounts.set(slug, count);
-      if (count > 1) slug = `${slug}-${count}`;
-      episodeSlugIndex.set(slug, e.id);
+      const slug = assignSlug(e.summary, episodeSlugIndex, e.id, 'episode');
       return `[ep:${slug}] (access=${e.access_count}, importance=${e.importance_score}) ${e.summary}`;
     })
     .join("\n");
 
-  log.debug({ slugCount: episodeSlugIndex.size, slugs: Array.from(episodeSlugIndex.keys()) }, "episode slug index built");
+  const entitiesText = entities
+    .map((e: { id: string; name: string; entity_type: string; canonical: string | null; relationships: unknown[] | null }) => {
+      const slug = assignSlug(e.name, entitySlugIndex, e.id, 'entity');
+      return `[entity:${slug}] ${e.name} (${e.entity_type}) canonical=${e.canonical ?? 'none'} relationships=${e.relationships?.length ?? 0}`;
+    })
+    .join("\n");
+
+  log.debug(
+    {
+      conceptSlugs: conceptSlugIndex.size,
+      episodeSlugs: episodeSlugIndex.size,
+      entitySlugs: entitySlugIndex.size,
+    },
+    "slug indexes built",
+  );
 
   const tracesText = traces
     .map((t: { id: string; memory_type: string | null; content: string }) =>
       `[trace:${t.id}] [${t.memory_type ?? 'unknown'}] ${t.content}`)
-    .join("\n");
-
-  const entitiesText = entities
-    .map((e: { id: string; name: string; entity_type: string; canonical: string | null; relationships: unknown[] | null }) =>
-      `[entity:${e.id}] ${e.name} (${e.entity_type}) canonical=${e.canonical ?? 'none'} relationships=${e.relationships?.length ?? 0}`)
     .join("\n");
 
   const prompt = `You are the memory curator for an AI assistant called Rufus. Rufus uses a multi-tier semantic memory system called USME (Utility-Shaped Memory Ecology) to maintain persistent knowledge across conversations. Your job is to review the full memory corpus and make structured improvements: consolidating duplicates, correcting stale information, surfacing patterns as reusable skills, and mapping relationships between entities.
@@ -312,7 +335,9 @@ Do not rush to the structured output. The thinking block is where you do the rea
 
 After your thinking block, call the reflection_output tool with:
 
-1. **concept_updates** — raise/lower importance, deprecate outdated or superseded concepts, merge duplicates. For each, ask: Is this still true? Is it specific enough to be useful? Is it already captured more precisely elsewhere?
+**CRITICAL — use slugs, not UUIDs.** Concepts are labelled [concept:<slug>], entities are labelled [entity:<slug>], and episodes are labelled [ep:<slug>]. In every field below that references an id (concept_id, winner_concept_id, loser_concept_id, merge_target_id, entity_id, source_episode_ids), you MUST copy the slug exactly as it appears in the corpus label — do not invent or hallucinate identifiers. The server maps slugs back to real UUIDs; if you return an unknown string the item will be silently skipped.
+
+1. **concept_updates** — raise/lower importance, deprecate outdated or superseded concepts, merge duplicates. For each, ask: Is this still true? Is it specific enough to be useful? Is it already captured more precisely elsewhere? Set concept_id to the slug from the [concept:<slug>] label. For merge actions, set merge_target_id to the slug of the concept being merged into.
 
 2. **new_skills** — patterns that recur across multiple episodes and would transfer to similar future situations. Only include skills with confidence >= 0.5; anything lower is not worth proposing. Prefer fewer, higher-quality skills over a long list of marginal ones. **Do not propose a skill whose name already exists in the skills table** — duplicates will be silently dropped. For each skill, populate **source_episode_ids** with the slug strings from the [ep:<slug>] labels in the corpus above that evidence the pattern — copy the slug exactly as it appears (e.g. ["fix-postgres-savepoint-cascade", "debug-max-tokens-truncation"]). Do not invent slugs that are not in the corpus.
 
@@ -341,9 +366,9 @@ For example, a multi-line description MUST be written as a single JSON string li
 
 NOT as a literal multi-line block. If you write actual line breaks inside a JSON string value, the JSON becomes invalid and ALL data in that array field will be silently discarded. When in doubt, keep descriptions to a single paragraph with no newlines at all.
 
-3. **contradictions** — concepts that conflict with each other or with recent episode evidence. Pick the winner based on recency and strength of evidence, not just the confidence score alone.
+3. **contradictions** — concepts that conflict with each other or with recent episode evidence. Pick the winner based on recency and strength of evidence, not just the confidence score alone. Set winner_concept_id and loser_concept_id to the slugs from their [concept:<slug>] labels.
 
-4. **entity_updates** — add relationships that are clearly established by episode and trace evidence. Skip speculative or one-off associations.
+4. **entity_updates** — add relationships that are clearly established by episode and trace evidence. Skip speculative or one-off associations. Set entity_id to the slug from the [entity:<slug>] label.
 
 5. **overall_assessment** — grade the corpus health (A/B/C/D), identify the most important gaps or improvement opportunities, and flag any patterns that should be addressed before the next reflection run.`;
 
@@ -361,7 +386,9 @@ NOT as a literal multi-line block. If you write actual line breaks inside a JSON
       promptLength: prompt.length,
       episodesTextLength: episodesText.length,
       episodesText,
-      slugCount: episodeSlugIndex.size,
+      episodeSlugs: episodeSlugIndex.size,
+      conceptSlugs: conceptSlugIndex.size,
+      entitySlugs: entitySlugIndex.size,
     },
     "reflect llm input"
   );
@@ -380,10 +407,10 @@ NOT as a literal multi-line block. If you write actual line breaks inside a JSON
             items: {
               type: "object",
               properties: {
-                concept_id: { type: "string" },
+                concept_id: { type: "string", description: "Slug from [concept:<slug>] label in corpus — copy exactly, do not invent" },
                 action: { type: "string", enum: ["raise", "lower", "deprecate", "merge"] },
                 importance_delta: { type: "number" },
-                merge_target_id: { type: "string" },
+                merge_target_id: { type: "string", description: "Slug from [concept:<slug>] label of the merge target — copy exactly" },
                 reason: { type: "string" },
               },
               required: ["concept_id", "action", "reason"],
@@ -409,8 +436,8 @@ NOT as a literal multi-line block. If you write actual line breaks inside a JSON
             items: {
               type: "object",
               properties: {
-                winner_concept_id: { type: "string" },
-                loser_concept_id: { type: "string" },
+                winner_concept_id: { type: "string", description: "Slug from [concept:<slug>] label — copy exactly" },
+                loser_concept_id: { type: "string", description: "Slug from [concept:<slug>] label — copy exactly" },
                 reason: { type: "string" },
               },
               required: ["winner_concept_id", "loser_concept_id", "reason"],
@@ -421,7 +448,7 @@ NOT as a literal multi-line block. If you write actual line breaks inside a JSON
             items: {
               type: "object",
               properties: {
-                entity_id: { type: "string" },
+                entity_id: { type: "string", description: "Slug from [entity:<slug>] label in corpus — copy exactly, do not invent" },
                 action: { type: "string", enum: ["add_relationship", "remove_relationship", "reclassify"] },
                 details: { type: "object" },
               },
@@ -475,7 +502,9 @@ NOT as a literal multi-line block. If you write actual line breaks inside a JSON
       JSON.stringify({
         timestamp: new Date().toISOString(),
         episodesText,
-        slugIndex: Object.fromEntries(episodeSlugIndex),
+        episodeSlugIndex: Object.fromEntries(episodeSlugIndex),
+        conceptSlugIndex: Object.fromEntries(conceptSlugIndex),
+        entitySlugIndex: Object.fromEntries(entitySlugIndex),
         rawNewSkills: (rawOutput as Record<string, unknown>).new_skills,
       }, null, 2),
     );
@@ -552,6 +581,36 @@ NOT as a literal multi-line block. If you write actual line breaks inside a JSON
   }
 
   const output = parseResult.data;
+
+  // ── Slug → UUID remapping ───────────────────────────────
+  // The LLM was shown slugs (e.g. "use-lru-cache-over-custom-map") instead of UUIDs.
+  // Remap each slug back to the real UUID before any DB operation.
+  // If a slug isn't in the index the LLM hallucinated it; log and leave the value
+  // as-is (subsequent UUID-set checks will filter it out for contradictions; the
+  // savepoint-per-update pattern will catch FK violations for concepts/entities).
+
+  function remapSlug(slug: string, index: Map<string, string>, label: string): string {
+    const uuid = index.get(slug.trim());
+    if (uuid !== undefined) return uuid;
+    log.warn({ slug, label }, "slug not found in index — LLM may have hallucinated this identifier");
+    return slug; // pass through; downstream validation will reject unknown UUIDs
+  }
+
+  for (const u of output.concept_updates) {
+    u.concept_id = remapSlug(u.concept_id, conceptSlugIndex, 'concept_id');
+    if (u.merge_target_id !== undefined) {
+      u.merge_target_id = remapSlug(u.merge_target_id, conceptSlugIndex, 'merge_target_id');
+    }
+  }
+
+  for (const c of output.contradictions) {
+    c.winner_concept_id = remapSlug(c.winner_concept_id, conceptSlugIndex, 'winner_concept_id');
+    c.loser_concept_id  = remapSlug(c.loser_concept_id,  conceptSlugIndex, 'loser_concept_id');
+  }
+
+  for (const u of output.entity_updates) {
+    u.entity_id = remapSlug(u.entity_id, entitySlugIndex, 'entity_id');
+  }
 
   log.info({
     conceptUpdates: output.concept_updates.length,
@@ -761,6 +820,10 @@ NOT as a literal multi-line block. If you write actual line breaks inside a JSON
 
     // Apply contradictions
     for (const contradiction of output.contradictions) {
+      if (!conceptIdSet.has(contradiction.winner_concept_id) || !conceptIdSet.has(contradiction.loser_concept_id)) {
+        log.warn({ contradiction }, "contradiction skipped — winner or loser UUID not found in fetched concepts");
+        continue;
+      }
       const sp = `sp_${spCount++}`;
       await client2.query(`SAVEPOINT ${sp}`);
       try {
