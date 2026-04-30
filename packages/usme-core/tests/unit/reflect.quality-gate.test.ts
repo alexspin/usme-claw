@@ -66,7 +66,8 @@ function setupEmptyCorpus() {
     .mockResolvedValueOnce({ rows: [] }) // traces
     .mockResolvedValueOnce({ rows: [] }) // entities
     .mockResolvedValueOnce({ rows: [] }) // existing skills
-    .mockResolvedValueOnce({ rows: [] }); // pending skill_candidates
+    .mockResolvedValueOnce({ rows: [] }) // pending skill_candidates
+    .mockResolvedValueOnce({ rows: [] }); // active constraints (fetchActiveConstraints)
 }
 
 function setupTransactionMocks() {

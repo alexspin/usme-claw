@@ -8,9 +8,24 @@ Current date: {date}
 
 ## Instructions
 
-Extract all named entities (people, organizations, projects, tools, locations, concepts) mentioned in this turn. For each entity, provide a canonical name (lowercase, normalized form).
+Extract named entities and relationships that a human would explicitly think about when planning or reviewing work. For each entity, provide a canonical name (lowercase, normalized form).
 
 Then extract relationships between entities.
+
+### The bar for inclusion
+
+Ask yourself: **"Would someone write this on a whiteboard when explaining the system?"** If yes, it's an entity. If no, skip it.
+
+Do NOT extract something just because it's mentioned. A filename, a SQL migration script, a git commit hash, a tool call argument, a config key, or a random string is not an entity — unless it represents something the user actively manages, depends on, or makes decisions about as a whole.
+
+For example:
+- ✅ "PostgreSQL" — a system Alex depends on and makes architectural decisions about
+- ✅ "usme-claw" — a project Alex actively manages
+- ✅ "Alex" — a person doing the work
+- ❌ "reflect-corpus.ts" — a source file mentioned in passing; skip it unless it's a landmark the user makes explicit decisions about
+- ❌ "018-entity-rel-unique.sql" — a migration filename; skip it
+- ❌ "1324110" — a commit hash; skip it
+- ❌ "DATABASE_URL" — a config key; skip it
 
 ### Entity Types
 - **person**: A named individual (e.g., "Alice", "Dr. Smith")
@@ -28,7 +43,7 @@ Then extract relationships between entities.
 - **owns**: Person/org owns project/tool
 - **uses**: Person/org/project uses tool
 - **part_of**: Entity is part of another entity
-- **related_to**: General relationship when no specific type fits
+- **related_to**: General relationship when absolutely no other type fits — use sparingly; if you're unsure, skip the relationship entirely
 
 ### Canonical Names
 Always use a normalized lowercase form for canonical names. For example:

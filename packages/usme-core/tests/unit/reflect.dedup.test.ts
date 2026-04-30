@@ -88,7 +88,8 @@ function setupCorpusQueries(opts: {
     .mockResolvedValueOnce({ rows: [] }) // traces
     .mockResolvedValueOnce({ rows: [] }) // entities
     .mockResolvedValueOnce({ rows: [] }) // existing skills
-    .mockResolvedValueOnce({ rows: candidates }); // skill_candidates
+    .mockResolvedValueOnce({ rows: candidates }) // skill_candidates
+    .mockResolvedValueOnce({ rows: [] }); // active constraints (fetchActiveConstraints)
 }
 
 /**
@@ -186,11 +187,11 @@ describe("runReflection — dedup / candidate_dismissals / trgm guard", () => {
     const { runReflection } = await import("../../src/consolidate/reflect.js");
     const result = await runReflection({ triggerSource: "test", dryRun: false });
 
-    // SAVEPOINT candidate_dismissals should be set
+    // A SAVEPOINT should be set for candidate_dismissals (now uses sp_N naming)
     const savepointCall = mockClient.query.mock.calls.find(
       (call: unknown[]) =>
         typeof call[0] === "string" &&
-        (call[0] as string) === "SAVEPOINT candidate_dismissals",
+        (call[0] as string).startsWith("SAVEPOINT sp_"),
     );
     expect(savepointCall).toBeDefined();
 

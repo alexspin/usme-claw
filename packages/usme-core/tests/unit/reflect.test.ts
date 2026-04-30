@@ -71,7 +71,8 @@ function makeEmptyCorpusQueries() {
     .mockResolvedValueOnce({ rows: [] }) // traces
     .mockResolvedValueOnce({ rows: [] }) // entities
     .mockResolvedValueOnce({ rows: [] }) // existing skill names (SELECT name FROM skills)
-    .mockResolvedValueOnce({ rows: [] }); // pending skill_candidates
+    .mockResolvedValueOnce({ rows: [] }) // pending skill_candidates
+    .mockResolvedValueOnce({ rows: [] }); // active constraints (fetchActiveConstraints)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -181,7 +182,8 @@ describe("runReflection — skill confidence routing", () => {
       .mockResolvedValueOnce({ rows: [] }) // traces
       .mockResolvedValueOnce({ rows: [] }) // entities
       .mockResolvedValueOnce({ rows: [] }) // existing skill names
-      .mockResolvedValueOnce({ rows: [] }); // pending skill_candidates
+      .mockResolvedValueOnce({ rows: [] }) // pending skill_candidates
+    .mockResolvedValueOnce({ rows: [] }); // active constraints (fetchActiveConstraints)
 
     mockMessagesCreate.mockResolvedValue({
       content: [
@@ -260,7 +262,8 @@ describe("runReflection — concept/entity slug remapping", () => {
         rows: [{ id: ENTITY_UUID, name: "Alex", entity_type: "person", canonical: null, relationships: [] }],
       }) // entities
       .mockResolvedValueOnce({ rows: [] }) // existing skill names
-      .mockResolvedValueOnce({ rows: [] }); // pending skill_candidates
+      .mockResolvedValueOnce({ rows: [] }) // pending skill_candidates
+    .mockResolvedValueOnce({ rows: [] }); // active constraints (fetchActiveConstraints)
   }
 
   it("remaps concept slug to UUID in concept_updates before DB write", async () => {

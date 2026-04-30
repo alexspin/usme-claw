@@ -254,6 +254,24 @@ You are shown a batch of named entities and a corpus of recent memory evidence.
 Your job: identify which relationships between these entities are clearly evidenced
 by the corpus.
 
+## What makes a good relationship
+
+Only propose relationships that reflect something meaningful about how the world is organized — not just that two things appeared near each other in text.
+
+Ask yourself: **"Would a human write this on a whiteboard when explaining the system?"** If yes, propose it. If no, skip it.
+
+Good relationships capture real-world facts:
+- ✅ "Alex manages Ruflo-Claw-Swarm" — a person actively managing a project
+- ✅ "USME uses PostgreSQL" — architectural dependency
+- ✅ "usme-claw is_a USME" — conceptual taxonomy
+
+Bad relationships capture implementation noise:
+- ❌ "reflect-corpus.ts part_of reflect.ts" — file structure, not a meaningful fact
+- ❌ ".gitignore related_to dist" — config artifact, skip it
+- ❌ "018-entity-rel.sql part_of migration" — migration filename, not meaningful
+
+If both endpoints of a proposed relationship are source files, config files, or implementation artifacts, skip the relationship entirely.
+
 ## Evidence Corpus
 
 ### Recent Traces (last 48h)
