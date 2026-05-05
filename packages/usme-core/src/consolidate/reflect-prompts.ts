@@ -46,8 +46,31 @@ Before reviewing, understand what each tier holds and what good vs. bad memory l
 
 **concepts** — Stable, long-term knowledge intended to persist indefinitely. A good concept is a durable truth — a preference that holds across projects ("battle-tested libraries over custom implementations"), a decision that was made and stands ("embeddings route through OpenAI, not Anthropic"), or a relationship fact ("Ronan calls Alex weekly at 5:30 PM Pacific"). Bad concepts are too specific to a single event, already superseded by something more recent, or so generic they provide no actionable signal. Concepts that contradict each other need resolution — only one can be true.
 
-**entities** — Named things: people, projects, tools, organizations. An entity is worth tracking when it's referenced frequently enough to warrant mapping its relationships.
-- Good relationship: Alex MAINTAINS usme-claw, Rufus USES ruflo-swarm, nightly.ts GATES ON importance_score
+**entities** — Named things worth tracking across time: people, projects, tools, organizations, components, and other durable objects that remain relevant across multiple conversations or work sessions. An entity is worth tracking when it is referenced repeatedly enough to justify mapping relationships.
+
+Prefer entities that would still matter if the exact command, file, or session changed.
+
+**Hard exclusions — NEVER create entities for these:**
+- File paths, filenames, or directory names (e.g., reflect-prompts.ts, /home/alex/..., usme-openclaw/)
+- Shell commands, command flags, logs, stack traces, or SQL fragments
+- Commit hashes or any hex string (e.g., c1ac9ca, 920ff43)
+- Version strings (e.g., v1.2.3, gpt-4o, node 22)
+- Temporary session labels or generated names (e.g., plaid-harbor, young-valley, marine-zephyr)
+- Generated IDs or summary slugs (e.g., sum_3fdd36b, ep:abc123)
+- Migration script names (e.g., 018-entity-rel-unique.sql)
+- One-off tool invocations, config keys, or environment variable names
+- Any name matching the pattern: adjective-noun where both parts appear to be random words (these are ephemeral session identifiers)
+
+**Exception:** A file, tool, or artifact may be treated as an entity **only if all three are true:**
+1. It is referenced in 3 or more distinct traces or episodes as a goal-critical object
+2. The user makes active decisions about it (not just runs it incidentally)
+3. Removing this entity from the graph would make the graph meaningfully less useful
+
+Examples: AGENTS.md (constantly referenced, decisions made about it) YES vs reflect-corpus.ts (mentioned in code discussions, not a decision object) NO
+
+Ask yourself the **whiteboard test**: if a new engineer joined the team today, would you write this thing's name on the whiteboard when explaining how the system works? If not, skip it.
+
+- Good relationship: Alex MAINTAINS usme-claw, Rufus USES ruflo-swarm, deploy-pipeline IS_A operational-component
 - Bad relationship: vague associations with no directional meaning ("Alex — USME")
 Orphan entities with no relationships and low reference frequency should be candidates for pruning.
 
@@ -122,7 +145,7 @@ NOT as a literal multi-line block. If you write actual line breaks inside a JSON
 
 3. **contradictions** — concepts that conflict with each other or with recent episode evidence. Pick the winner based on recency and strength of evidence, not just the confidence score alone. Set winner_concept_id and loser_concept_id to the slugs from their [concept:<slug>] labels.
 
-4. **entity_updates** — add a relationship only if it is evidenced by at least 2 distinct traces or episodes in this corpus. Do not add generic "related_to" or "related" edges — only directional verbs: uses, manages, owns, part_of, calls, routes_via, works_at, is_a. Maximum 20 entity_updates per run; return fewer if you cannot find 20 that clear the evidence bar. Set entity_id to the slug from the [entity:<slug>] label.
+4. **entity_updates** — add a relationship only if it is evidenced by at least 2 distinct traces or episodes in this corpus. Do not add generic "related_to" or "related" edges — only directional verbs: uses, manages, owns, part_of, calls, routes_via, works_at, is_a. Do not create or update entities for ephemeral references unless they clearly function as durable, repeatedly referenced, goal-critical objects in this corpus. Maximum 20 entity_updates per run; return fewer if you cannot find 20 that clear the evidence bar. Set entity_id to the slug from the [entity:<slug>] label.
 
 5. **new_constraints** — behavioral rules and stop-rules extracted from user correction patterns in the trace and episode corpus. Look for:
    - Repeated explicit corrections: things the user has said "stop doing" or "always do first" more than once

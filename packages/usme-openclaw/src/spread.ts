@@ -179,6 +179,7 @@ export async function spreadingActivation(
     teachability: null,
     tags: [],
     similarity: 0.3, // base score for spreading activation results
+    reflectionQualityScore: null,
   }));
 
   const combined = [...candidates, ...newCandidates];

@@ -7,6 +7,12 @@ import { jsonrepair } from "jsonrepair";
 import { logger } from "../logger.js";
 import type { z } from "zod";
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isUuid(value: unknown): value is string {
+  return typeof value === 'string' && UUID_RE.test(value.trim());
+}
+
 const log = logger.child({ module: "reflect-writes" });
 
 // ── Slug remap ─────────────────────────────────────────────
@@ -282,6 +288,19 @@ export async function writeEntityUpdates(
     await client.query(`SAVEPOINT ${spName}`);
     try {
       const details = update.details as Record<string, unknown>;
+      if (!isUuid(update.entity_id)) {
+        log.warn({ update }, "entity update skipped — source entity slug did not remap to UUID");
+        await client.query(`RELEASE SAVEPOINT ${spName}`);
+        continue;
+      }
+
+      const resolvedTarget = details.target_entity_id ?? details.target_id ?? update.entity_id;
+      if ((update.action === 'add_relationship' || update.action === 'remove_relationship') && !isUuid(resolvedTarget)) {
+        log.warn({ update, resolvedTarget }, "entity update skipped — target entity slug did not remap to UUID");
+        await client.query(`RELEASE SAVEPOINT ${spName}`);
+        continue;
+      }
+
       if (update.action === 'add_relationship') {
         const relVerb = ((details.relationship ?? 'related') as string).toLowerCase();
         await client.query(
@@ -291,7 +310,7 @@ export async function writeEntityUpdates(
            ON CONFLICT (source_id, target_id, relationship, valid_until) DO NOTHING`,
           [
             update.entity_id,
-            details.target_entity_id ?? details.target_id ?? update.entity_id,
+            resolvedTarget,
             relVerb,
             details.confidence ?? 0.8,
             JSON.stringify({ from_reflection: runId ?? null }),
@@ -302,7 +321,7 @@ export async function writeEntityUpdates(
         await client.query(
           `UPDATE entity_relationships SET valid_until = NOW()
            WHERE source_id = $1 AND target_id = $2 AND valid_until IS NULL`,
-          [update.entity_id, details.target_entity_id ?? details.target_id ?? update.entity_id],
+          [update.entity_id, resolvedTarget],
         );
         count++;
       } else if (update.action === 'reclassify') {

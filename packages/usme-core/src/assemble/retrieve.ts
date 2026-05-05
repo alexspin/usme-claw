@@ -51,6 +51,7 @@ const TIER_QUERIES: Record<MemoryTier, string> = {
            true AS is_active, 0 AS access_count, NULL AS last_accessed,
            NULL AS teachability,
            array_to_json(tags) AS tags,
+           reflection_quality_score,
            1 - (embedding <=> $1::vector) AS similarity
     FROM sensory_trace
     WHERE embedding IS NOT NULL
@@ -63,6 +64,7 @@ const TIER_QUERIES: Record<MemoryTier, string> = {
            created_at, 'user' AS provenance_kind, 'medium' AS utility_prior,
            1.0 AS confidence, true AS is_active, access_count, last_accessed,
            NULL AS teachability,
+           reflection_quality_score,
            1 - (embedding <=> $1::vector) AS similarity
     FROM episodes
     WHERE embedding IS NOT NULL
@@ -75,6 +77,7 @@ const TIER_QUERIES: Record<MemoryTier, string> = {
            created_at, provenance_kind, 'medium' AS utility_prior,
            confidence, is_active, access_count, last_accessed,
            NULL AS teachability,
+           reflection_quality_score,
            1 - (embedding <=> $1::vector) AS similarity
     FROM concepts
     WHERE embedding IS NOT NULL AND is_active = true
@@ -88,6 +91,7 @@ const TIER_QUERIES: Record<MemoryTier, string> = {
            1.0 AS confidence, (status = 'active') AS is_active,
            use_count AS access_count, last_used AS last_accessed,
            teachability,
+           NULL::real AS reflection_quality_score,
            1 - (embedding <=> $1::vector) AS similarity
     FROM skills
     WHERE embedding IS NOT NULL AND status = 'active'
@@ -101,6 +105,7 @@ const TIER_QUERIES: Record<MemoryTier, string> = {
            created_at, 'model' AS provenance_kind, 'medium' AS utility_prior,
            confidence, true AS is_active, 0 AS access_count,
            NULL AS last_accessed, NULL AS teachability,
+           NULL::real AS reflection_quality_score,
            1 - (embedding <=> $1::vector) AS similarity
     FROM entities
     WHERE embedding IS NOT NULL
@@ -134,6 +139,7 @@ async function queryTier(
     teachability: r.teachability != null ? Number(r.teachability) : null,
     tags: tier === 'sensory_trace' ? ((r.tags as string[] | null) ?? []) : [],
     similarity: Number(r.similarity),
+    reflectionQualityScore: r.reflection_quality_score != null ? Number(r.reflection_quality_score) : null,
   }));
 }
 

@@ -321,6 +321,27 @@ export async function runReflection(opts: ReflectionOptions): Promise<Reflection
     changes.entitiesUpdated = await writeEntityUpdates(dbClient, output.entity_updates as Array<{ entity_id: string; action: string; details: unknown }>, entitySlugIndex, sp, runId);
     await writeConstraints(dbClient, output.new_constraints ?? [], sp);
 
+    // ── Mark reviewed concepts with reflection_quality_score + last_reviewed_at ──
+    // All concepts touched in this run (raised/lowered/deprecated/merged) are stamped.
+    // Score derived from utility_score so it reflects the curator's assessment.
+    // Concepts not touched in this run keep their existing score (or NULL if never reviewed).
+    if (output.concept_updates.length > 0) {
+      const reviewedIds = output.concept_updates
+        .map((u) => u.concept_id)
+        .filter((id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id));
+      if (reviewedIds.length > 0) {
+        const placeholders = reviewedIds.map((_, i) => `$${i + 1}`).join(', ');
+        await dbClient.query(
+          `UPDATE concepts
+           SET reflection_quality_score = LEAST(1.0, GREATEST(0.0, utility_score)),
+               reflection_last_reviewed_at = NOW()
+           WHERE id IN (${placeholders})`,
+          reviewedIds,
+        );
+        log.info({ count: reviewedIds.length }, "stamped reflection_quality_score on reviewed concepts");
+      }
+    }
+
     // ── Post-run notification flag ────────────────────────
     let pendingMorningNotify = false;
     if (candidatesCreated > 0) {

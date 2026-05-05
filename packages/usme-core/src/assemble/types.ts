@@ -60,6 +60,11 @@ export interface RetrievalCandidate {
   tags: string[];
   /** Cosine similarity to query, computed by pgvector. Range [0, 1]. */
   similarity: number;
+  /**
+   * Reflection quality score [0, 1]. NULL = never reviewed (treated as neutral 0.5).
+   * Set by the reflection pipeline after curator review.
+   */
+  reflectionQualityScore: number | null;
 }
 
 export interface ScoredCandidate extends RetrievalCandidate {
@@ -73,6 +78,7 @@ export interface ScoreBreakdown {
   provenance: number;
   accessFrequency: number;
   teachability?: number;
+  reflectionQuality?: number;
 }
 
 export type AssemblyMode = 'psycho-genius' | 'brilliant' | 'smart-efficient';

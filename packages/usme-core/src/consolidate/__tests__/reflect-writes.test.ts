@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { tryParseArray, normalizeArrayFields, writeConstraints } from "../reflect-writes.js";
+import { tryParseArray, normalizeArrayFields, writeConstraints, writeEntityUpdates } from "../reflect-writes.js";
 import type { SpCounter } from "../reflect-writes.js";
 
 // ── tryParseArray ──────────────────────────────────────────
@@ -93,6 +93,65 @@ describe("normalizeArrayFields", () => {
 });
 
 // ── writeConstraints dedup ─────────────────────────────────
+
+describe("writeEntityUpdates", () => {
+  function makeEntityClient() {
+    return {
+      query: vi.fn(async () => ({ rows: [] })),
+    };
+  }
+
+  it("skips add_relationship when source slug did not remap to UUID", async () => {
+    const client = makeEntityClient();
+    const sp: SpCounter = { count: 0 };
+
+    const written = await writeEntityUpdates(
+      client,
+      [{ entity_id: "env-secretssh", action: "add_relationship", details: { target_entity_id: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee", relationship: "uses" } }],
+      new Map(),
+      sp,
+      72,
+    );
+
+    expect(written).toBe(0);
+    const insertCalls = client.query.mock.calls.filter((c: unknown[]) => (c[0] as string).includes("INSERT INTO entity_relationships"));
+    expect(insertCalls).toHaveLength(0);
+  });
+
+  it("skips add_relationship when target slug did not remap to UUID", async () => {
+    const client = makeEntityClient();
+    const sp: SpCounter = { count: 0 };
+
+    const written = await writeEntityUpdates(
+      client,
+      [{ entity_id: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee", action: "add_relationship", details: { target_entity_id: "env-secretssh", relationship: "uses" } }],
+      new Map(),
+      sp,
+      72,
+    );
+
+    expect(written).toBe(0);
+    const insertCalls = client.query.mock.calls.filter((c: unknown[]) => (c[0] as string).includes("INSERT INTO entity_relationships"));
+    expect(insertCalls).toHaveLength(0);
+  });
+
+  it("writes add_relationship when both ids are UUIDs", async () => {
+    const client = makeEntityClient();
+    const sp: SpCounter = { count: 0 };
+
+    const written = await writeEntityUpdates(
+      client,
+      [{ entity_id: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee", action: "add_relationship", details: { target_entity_id: "ffffffff-ffff-4fff-8fff-ffffffffffff", relationship: "uses" } }],
+      new Map(),
+      sp,
+      72,
+    );
+
+    expect(written).toBe(1);
+    const insertCalls = client.query.mock.calls.filter((c: unknown[]) => (c[0] as string).includes("INSERT INTO entity_relationships"));
+    expect(insertCalls).toHaveLength(1);
+  });
+});
 
 describe("writeConstraints", () => {
   function makeClient(similarityRows: unknown[]) {

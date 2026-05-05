@@ -7,13 +7,20 @@
 
 import type { MemoryTier, RetrievalCandidate, ScoredCandidate, ScoreBreakdown } from "./types.js";
 
-/** Default weights (D6). */
+/** Default weights (D6 + reflection_quality). Sum = 1.0. */
 const DEFAULT_WEIGHTS = {
   similarity: 0.40,
-  recency: 0.25,
-  provenance: 0.20,
-  accessFreq: 0.15,
+  recency: 0.20,
+  provenance: 0.15,
+  accessFreq: 0.10,
+  reflectionQuality: 0.15,
 } as const;
+
+/**
+ * Neutral score for never-reviewed memories (NULL reflection_quality_score).
+ * 0.5 avoids cold-start bias: unreviewed items are neither penalized nor boosted.
+ */
+const REFLECTION_QUALITY_NEUTRAL = 0.5;
 
 /** Skill-specific weights (D7). */
 const SKILL_WEIGHTS = {
@@ -70,6 +77,10 @@ function scoreCandidate(
   let score: number;
   let breakdown: ScoreBreakdown;
 
+  const rqs = candidate.reflectionQualityScore != null
+    ? candidate.reflectionQualityScore
+    : REFLECTION_QUALITY_NEUTRAL;
+
   if (candidate.tier === "skills" && candidate.teachability != null) {
     const teach = candidate.teachability / 10; // normalize 0-10 to 0-1
     score =
@@ -84,8 +95,9 @@ function scoreCandidate(
       DEFAULT_WEIGHTS.similarity * sim +
       DEFAULT_WEIGHTS.recency * rec +
       DEFAULT_WEIGHTS.provenance * prov +
-      DEFAULT_WEIGHTS.accessFreq * acc;
-    breakdown = { similarity: sim, recency: rec, provenance: prov, accessFrequency: acc };
+      DEFAULT_WEIGHTS.accessFreq * acc +
+      DEFAULT_WEIGHTS.reflectionQuality * rqs;
+    breakdown = { similarity: sim, recency: rec, provenance: prov, accessFrequency: acc, reflectionQuality: rqs };
   }
 
   return { ...candidate, score, scoreBreakdown: breakdown };
