@@ -1,7 +1,7 @@
 {
   "id": "usme-claw",
   "name": "USME Context Engine",
-  "description": "Utility-Shaped Memory Ecology — relevance-based context assembly (shadow mode via before_prompt_build hook)",
+  "description": "Utility-Shaped Memory Ecology — relevance-based context assembly with active, log-only, and off modes",
   "version": "0.1.0",
   "configSchema": {
     "type": "object",
