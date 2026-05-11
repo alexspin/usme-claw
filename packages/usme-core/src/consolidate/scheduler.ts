@@ -58,23 +58,35 @@ export async function startScheduler(
   config: SchedulerConfig = {},
 ): Promise<SchedulerHandle> {
   const cronExpr = config.cronExpression ?? "0 3 * * *";
+  log.info({
+    phase: "scheduler_start",
+    cronExpression: cronExpr,
+    runOnStart: !!config.runOnStart,
+    miniConsolidationIntervalMs: config.miniConsolidationIntervalMs ?? null,
+    miniConsolidationTurnThreshold: config.miniConsolidationTurnThreshold ?? null,
+    hasSendFn: typeof config.sendFn === "function",
+    sonnetModel: config.sonnetModel,
+    opusModel: config.opusModel,
+    embeddingApiKeyPresent: !!config.embeddingApiKey,
+    embeddingApiKeyLength: config.embeddingApiKey?.length ?? 0,
+  }, "scheduler starting");
 
   const runMini = async (): Promise<number> => {
-    log.info("Running mini-consolidation (sensory_trace → episodes)");
+    log.info({ phase: "mini_consolidation_start" }, "Running mini-consolidation (sensory_trace to episodes)");
     try {
       const count = await stepEpisodify(client, pool, { ...config, tracesPerBatch: 100 });
-      log.info(`Mini-consolidation: created ${count} episodes`);
+      log.info({ phase: "mini_consolidation_success", episodesCreated: count }, `Mini-consolidation: created ${count} episodes`);
       return count;
     } catch (err) {
-      log.error({ err }, "Mini-consolidation failed");
+      log.error({ phase: "mini_consolidation", err }, "Mini-consolidation failed");
       return 0;
     }
   };
 
   const runJob = async (): Promise<NightlyResult> => {
-    log.info("nightly consolidation starting");
+    log.info({ phase: "nightly_consolidation_start" }, "nightly consolidation starting");
     const result = await runNightlyConsolidation(client, pool, config);
-    log.info({ result }, "nightly consolidation complete");
+    log.info({ phase: "nightly_consolidation_success", result }, "nightly consolidation complete");
     return result;
   };
 
@@ -83,7 +95,9 @@ export async function startScheduler(
   // pg-boss v12+ requires queues to exist before scheduling
   const queues = ["usme-nightly", "usme-reflection-morning", "usme-reflection-evening", "usme-skill-delivery", "usme-mini-consolidation"];
   for (const q of queues) {
-    await boss.createQueue(q).catch(() => { /* already exists — idempotent */ });
+    await boss.createQueue(q).catch((err: unknown) => {
+      log.debug({ phase: "scheduler_create_queue", queue: q, err }, "createQueue failed or already exists");
+    });
   }
 
   // Register persistent cron schedules (idempotent upserts)
@@ -93,72 +107,76 @@ export async function startScheduler(
   await boss.schedule("usme-skill-delivery", "0 17 * * *", {}, { tz: "UTC" });
   await boss.schedule("usme-mini-consolidation", "*/30 * * * *", {}, { tz: "UTC" });
 
-  log.info({ expr: cronExpr }, "nightly consolidation scheduler started (pg-boss)");
+  log.info({ phase: "scheduler_started", expr: cronExpr, queues }, "nightly consolidation scheduler started (pg-boss)");
 
   // Register workers for each scheduled queue
   await boss.work("usme-nightly", { localConcurrency: 1 }, async () => {
+    log.info({ phase: "scheduler_worker_start", queue: "usme-nightly" }, "scheduled worker fired");
     try {
       await runJob();
     } catch (err: unknown) {
-      log.error({ err }, "nightly consolidation job failed");
+      log.error({ phase: "nightly_consolidation_job", queue: "usme-nightly", err }, "nightly consolidation job failed");
     }
   });
 
   await boss.work("usme-reflection-morning", { localConcurrency: 1 }, async () => {
-    log.info("Starting scheduled reflection (08:00 Pacific)");
+    log.info({ phase: "scheduled_reflection_start", queue: "usme-reflection-morning", pacificHour: 8 }, "Starting scheduled reflection (08:00 Pacific)");
     try {
       const result = await runReflection({ triggerSource: "scheduler-morning", model: DEFAULT_REASONING_MODEL });
       if (result.candidatesCreated > 0) {
-        log.info({ candidatesCreated: result.candidatesCreated }, "reflection produced candidates — delivering now");
+        log.info({ phase: "scheduled_reflection_candidates", candidatesCreated: result.candidatesCreated }, "reflection produced candidates - delivering now");
         await deliverSkillCandidates(pool, config.sendFn);
       }
       const graphResult = await runGraphBuilder({ triggerSource: "scheduler-morning" });
-      log.info({ graphResult }, "graph build complete");
+      log.info({ phase: "graph_build_success", queue: "usme-reflection-morning", graphResult }, "graph build complete");
     } catch (err) {
-      log.error({ err }, "scheduled reflection (morning) failed");
+      log.error({ phase: "scheduled_reflection_morning", err }, "scheduled reflection (morning) failed");
     }
   });
 
   await boss.work("usme-reflection-evening", { localConcurrency: 1 }, async () => {
-    log.info("Starting scheduled reflection (20:00 Pacific)");
+    log.info({ phase: "scheduled_reflection_start", queue: "usme-reflection-evening", pacificHour: 20 }, "Starting scheduled reflection (20:00 Pacific)");
     try {
       const result = await runReflection({ triggerSource: "scheduler-evening", model: DEFAULT_REASONING_MODEL });
       if (result.candidatesCreated > 0) {
-        log.info({ candidatesCreated: result.candidatesCreated }, "reflection produced candidates — scheduling morning delivery via flag");
+        log.info({ phase: "scheduled_reflection_candidates", candidatesCreated: result.candidatesCreated }, "reflection produced candidates - scheduling morning delivery via flag");
       }
       const graphResult = await runGraphBuilder({ triggerSource: "scheduler-evening" });
-      log.info({ graphResult }, "graph build complete");
+      log.info({ phase: "graph_build_success", queue: "usme-reflection-evening", graphResult }, "graph build complete");
     } catch (err) {
-      log.error({ err }, "scheduled reflection (evening) failed");
+      log.error({ phase: "scheduled_reflection_evening", err }, "scheduled reflection (evening) failed");
     }
   });
 
   await boss.work("usme-skill-delivery", { localConcurrency: 1 }, async () => {
-    log.info("Running skill candidate delivery");
+    log.info({ phase: "skill_delivery_start", queue: "usme-skill-delivery" }, "Running skill candidate delivery");
     try {
       await deliverSkillCandidates(pool, config.sendFn);
     } catch (err) {
-      log.error({ err }, "skill candidate delivery failed");
+      log.error({ phase: "skill_delivery", err }, "skill candidate delivery failed");
     }
   });
 
   await boss.work("usme-mini-consolidation", { localConcurrency: 1 }, async () => {
-    await runMini().catch((err: unknown) => log.error({ err }, "mini-consolidation job failed"));
+    log.info({ phase: "scheduler_worker_start", queue: "usme-mini-consolidation" }, "scheduled worker fired");
+    await runMini().catch((err: unknown) => log.error({ phase: "mini_consolidation_job", err }, "mini-consolidation job failed"));
   });
 
   // Optionally run on start
   if (config.runOnStart) {
-    setImmediate(() => runJob().catch((err: unknown) => log.error({ err }, "nightly consolidation job failed")));
+    log.info({ phase: "scheduler_run_on_start" }, "scheduling immediate nightly consolidation");
+    setImmediate(() => runJob().catch((err: unknown) => log.error({ phase: "nightly_consolidation_run_on_start", err }, "nightly consolidation job failed")));
   }
 
   return {
     stop: async () => {
+      log.info({ phase: "scheduler_stop_start" }, "Scheduler stop starting");
       await boss.unschedule("usme-nightly");
       await boss.unschedule("usme-reflection-morning");
       await boss.unschedule("usme-reflection-evening");
       await boss.unschedule("usme-skill-delivery");
       await boss.unschedule("usme-mini-consolidation");
-      log.info("Scheduler stopped (schedules unregistered)");
+      log.info({ phase: "scheduler_stop_success" }, "Scheduler stopped (schedules unregistered)");
     },
     runNow: runJob,
     runMiniNow: runMini,

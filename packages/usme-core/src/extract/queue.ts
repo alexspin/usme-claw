@@ -67,7 +67,16 @@ export class ExtractionQueue {
     registry.set(jobId, { fn: job, attempts: 0 });
     this._pending++;
     const boss = await getPgBoss();
-    await boss.send(QUEUE_NAME, { jobId }, { retryLimit: RETRY_LIMIT, deadLetter: DLQ_NAME });
+    log.info({ phase: "extraction_enqueue_start", jobId, pending: this._pending, retryLimit: RETRY_LIMIT }, "enqueueing extraction job");
+    try {
+      await boss.send(QUEUE_NAME, { jobId }, { retryLimit: RETRY_LIMIT, deadLetter: DLQ_NAME });
+      log.info({ phase: "extraction_enqueue_success", jobId, pending: this._pending }, "extraction job enqueued");
+    } catch (err) {
+      registry.delete(jobId);
+      this._pending = Math.max(0, this._pending - 1);
+      log.error({ phase: "extraction_enqueue", err, jobId }, "extraction job enqueue failed");
+      throw err;
+    }
   }
 
   /**
@@ -103,12 +112,17 @@ export class ExtractionQueue {
 
     this._initPromise = (async () => {
       const boss = await getPgBoss();
+      log.info({ phase: "extraction_queue_init_start", queue: QUEUE_NAME, dlq: DLQ_NAME }, "initializing extraction queue");
 
       // pg-boss v12+ requires queues to exist before work()/send().
       // Guard with typeof check so test mocks without createQueue don't throw.
       if (typeof (boss as any).createQueue === "function") {
-        await boss.createQueue(QUEUE_NAME).catch(() => {});
-        await boss.createQueue(DLQ_NAME).catch(() => {});
+        await boss.createQueue(QUEUE_NAME).catch((err: unknown) => {
+          log.debug({ phase: "extraction_queue_create", queue: QUEUE_NAME, err }, "createQueue failed or already exists");
+        });
+        await boss.createQueue(DLQ_NAME).catch((err: unknown) => {
+          log.debug({ phase: "extraction_queue_create", queue: DLQ_NAME, err }, "createQueue failed or already exists");
+        });
       }
 
       await boss.work<{ jobId: string }>(
@@ -133,21 +147,24 @@ export class ExtractionQueue {
 
           entry.attempts++;
           this._processing = true;
+          log.info({ phase: "extraction_job_start", jobId, attempt: entry.attempts, pending: this._pending }, "extraction job starting");
 
           try {
             await entry.fn();
             this._completed++;
             registry.delete(jobId);
+            log.info({ phase: "extraction_job_success", jobId, completed: this._completed, pending: this._pending }, "extraction job complete");
           } catch (err) {
-            log.error({ err, jobId, attempt: entry.attempts }, "Job failed");
+            log.error({ phase: "extraction_job", err, jobId, attempt: entry.attempts }, "Job failed");
             if (entry.attempts >= RETRY_LIMIT) {
               // Exhausted retries; route to DLQ and clean up.
               this._failed++;
               registry.delete(jobId);
               try {
                 await boss.send(DLQ_NAME, { jobId, error: String(err) });
+                log.error({ phase: "extraction_job_dlq", jobId, attempts: entry.attempts }, "Job sent to dead-letter queue");
               } catch (dlqErr) {
-                log.error({ dlqErr }, "Failed to send job to dead-letter queue");
+                log.error({ phase: "extraction_job_dlq", dlqErr, jobId }, "Failed to send job to dead-letter queue");
               }
             } else {
               // Throw so pg-boss retries the job.

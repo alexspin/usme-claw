@@ -38,6 +38,7 @@ import type { SchedulerHandle, InjectedMemory } from "@usme/core";
 import { resolveConfig } from "./config.js";
 import { spreadingActivation } from "./spread.js";
 import { reflectCommand } from "./commands/reflect.js";
+import { errMeta, keyMeta, safePreview } from "./safe-log.js";
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -144,9 +145,35 @@ export default function usmePlugin(api: {
 
   // Treat legacy "disabled" value as "off" for backwards compatibility
   const effectiveMode = (config.mode as string) === "disabled" ? "off" : config.mode;
+  const log = logger.child({ module: "index" });
+
+  log.info({
+    phase: "startup_config",
+    mode: config.mode,
+    effectiveMode,
+    dbHost: config.db.host,
+    dbPort: config.db.port,
+    dbDatabase: config.db.database,
+    dbUser: config.db.user,
+    poolMax: config.db.poolMax,
+    idleTimeoutMs: config.db.idleTimeoutMs,
+    extractionEnabled: config.extraction?.enabled,
+    extractionModel: config.extraction?.model,
+    entityExtractionEnabled: config.extraction?.entityExtraction?.enabled,
+    entityExtractionModel: config.extraction?.entityExtraction?.model,
+    assemblyMode: config.assembly.defaultMode,
+    spreadingMaxDepth: config.spreading?.maxDepth ?? 0,
+    consolidationCron: config.consolidation.cron,
+    sonnetModel: config.consolidation.sonnetModel,
+    skillDraftingModel: config.consolidation.skillDraftingModel,
+    embeddingApiKey: keyMeta(config.embeddingApiKey),
+    envOpenaiApiKey: keyMeta(process.env.OPENAI_API_KEY),
+    envAnthropicApiKey: keyMeta(process.env.ANTHROPIC_API_KEY),
+  }, "[usme] startup config loaded");
 
   // ── off mode: do nothing at all ────────────────────────────────────────────
   if (effectiveMode === "off") {
+    log.info({ phase: "startup_exit", reason: "mode_off" }, "[usme] no-op path");
     api.logger.info("[usme] mode=off — no hooks registered, no connections opened");
     return;
   }
@@ -165,6 +192,15 @@ export default function usmePlugin(api: {
   if (anthropicKey) {
     if (!_schedulerHandle) {
       const anthropicClient = new Anthropic({ apiKey: anthropicKey });
+      log.info({
+        phase: "scheduler_start_enqueue",
+        sonnetModel: config.consolidation.sonnetModel,
+        skillDraftingModel: config.consolidation.skillDraftingModel,
+        cronExpression: config.consolidation.cron,
+        miniConsolidationIntervalMs: 30 * 60_000,
+        anthropicApiKey: keyMeta(anthropicKey),
+        embeddingApiKey: keyMeta(openaiKey),
+      }, "[usme] scheduler start requested");
       void (async () => {
         _schedulerHandle = await startScheduler(anthropicClient, pool, {
           sonnetModel: config.consolidation.sonnetModel,
@@ -185,20 +221,27 @@ export default function usmePlugin(api: {
               );
               api.logger.info("[usme] skill delivery system event fired successfully");
             } catch (err) {
+              log.error({ phase: "skill_delivery_system_event", ...errMeta(err) }, "[usme] skill delivery system event failed");
               api.logger.error(`[usme] skill delivery system event failed: ${err instanceof Error ? err.message : String(err)}`);
               // Log the card so it is not lost
-              api.logger.info(`[usme] skill delivery card (fallback log): ${card}`);
+              api.logger.info(`[usme] skill delivery card fallback preview: ${JSON.stringify(safePreview(card))}`);
             }
           },
         });
+        log.info({ phase: "scheduler_start_success" }, "[usme] consolidation scheduler started");
         api.logger.info("[usme] consolidation scheduler started");
-      })();
+      })().catch((err) => {
+        log.error({ phase: "scheduler_start", ...errMeta(err) }, "[usme] consolidation scheduler failed to start");
+        api.logger.error(`[usme] consolidation scheduler failed to start: ${err instanceof Error ? err.message : String(err)}`);
+      });
+    } else {
+      log.info({ phase: "scheduler_start_skip", reason: "already_started" }, "[usme] scheduler already running");
     }
   } else {
+    log.warn({ phase: "scheduler_start_skip", reason: "missing_anthropic_api_key", anthropicApiKey: keyMeta(anthropicKey) }, "[usme] scheduler disabled");
     api.logger.warn("[usme] no ANTHROPIC_API_KEY — consolidation scheduler disabled");
   }
 
-  const log = logger.child({ module: "index" });
   const isActive = effectiveMode === "active";
 
   api.logger.info(`[usme] mode=${effectiveMode}`);
@@ -207,7 +250,7 @@ export default function usmePlugin(api: {
   //
   // The before_prompt_build hook can return { prependContext } to inject text
   // into the prompt. Returning void/undefined leaves the prompt unchanged.
-  logger.debug({ mode: effectiveMode, isActive }, "[usme] hook registration");
+  log.info({ phase: "hook_registration", event: "before_prompt_build", mode: effectiveMode, isActive, priority: -5 }, "[usme] hook registration");
   api.logger.info(`[usme] registering hook (mode=${effectiveMode})`);
 
   api.on(
@@ -225,10 +268,10 @@ export default function usmePlugin(api: {
 
       const sessionId = ev.sessionId ?? hookCtx?.sessionId ?? "unknown";
       const sessionKey = hookCtx?.sessionKey ?? "";
-      log.debug({ sessionId, sessionKey, msgCount: (ev.messages ?? []).length }, "[usme] hook fired");
+      log.info({ phase: "before_prompt_build", sessionId, sessionKey, msgCount: (ev.messages ?? []).length }, "[usme] hook fired");
 
       if (/^agent:[^:]+:(cron|subagent):/.test(sessionKey)) {
-        log.debug("[usme] early exit: cron/subagent session filter matched");
+        log.info({ phase: "before_prompt_build_exit", sessionId, sessionKey, reason: "cron_or_subagent_session" }, "[usme] early exit");
         return undefined; // skip cron and subagent sessions — noise in memory
       }
 
@@ -248,16 +291,16 @@ export default function usmePlugin(api: {
         .reverse()
         .find((m) => m.role === "user");
 
-      log.debug({ hasLastUserMsg: !!lastUserMsg, preview: lastUserMsg?.content?.slice(0, 80) }, "[usme] lastUserMsg");
+      log.debug({ hasLastUserMsg: !!lastUserMsg, userMessage: safePreview(lastUserMsg?.content) }, "[usme] lastUserMsg");
       if (!lastUserMsg?.content) {
-        log.debug("[usme] early exit: no user message found");
+        log.info({ phase: "before_prompt_build_exit", sessionId, reason: "no_user_message" }, "[usme] early exit");
         return undefined;
       }
 
       const query = stripMetadataEnvelope(extractText(lastUserMsg.content));
-      log.debug({ queryLength: query?.length ?? 0, preview: (query ?? "").slice(0, 60) }, "[usme] query after strip");
+      log.debug({ query: safePreview(query) }, "[usme] query after strip");
       if (!query || query.length < 3) {
-        log.debug(`[usme] early exit: query too short (${query?.length ?? 0} chars)`);
+        log.info({ phase: "before_prompt_build_exit", sessionId, reason: "query_too_short", queryLength: query?.length ?? 0 }, "[usme] early exit");
         return undefined;
       }
 
@@ -272,23 +315,22 @@ export default function usmePlugin(api: {
 
       try {
         const embeddingKey = config.embeddingApiKey || openaiKey;
-        log.debug({ hasKey: !!embeddingKey, keyLen: embeddingKey?.length }, "[usme] embeddingKey check");
+        log.info({ phase: "embedding_check", sessionId, embeddingApiKey: keyMeta(embeddingKey) }, "[usme] embedding key check");
         if (!embeddingKey) {
-          log.warn("no embedding API key — skipping USME pipeline this turn");
-          log.debug("[usme] early exit: no embedding API key");
+          log.warn({ phase: "before_prompt_build_exit", sessionId, reason: "missing_embedding_api_key" }, "no embedding API key - skipping USME pipeline this turn");
           return undefined;
         }
 
-        log.debug({ queryPreview: query.slice(0, 60) }, "[usme] calling embedText");
+        log.info({ phase: "embedding_start", sessionId, query: safePreview(query) }, "[usme] calling embedText");
         const queryEmbedding = await embedText(query, embeddingKey);
-        log.debug({ vectorLength: queryEmbedding?.length ?? null }, "[usme] embedText OK");
+        log.info({ phase: "embedding_success", sessionId, vectorLength: queryEmbedding?.length ?? null }, "[usme] embedText OK");
 
         const assemblyMode = config.assembly.defaultMode;
         const tokenBudget = (
           config.assembly.modes as Record<string, { tokenBudget: number }>
         )[assemblyMode].tokenBudget;
 
-        log.debug({ mode: assemblyMode, tokenBudget, turnIndex: agentMessages.filter(m => m.role === "user").length }, "[usme] calling coreAssemble");
+        log.info({ phase: "assemble_start", sessionId, mode: assemblyMode, tokenBudget, turnIndex: agentMessages.filter(m => m.role === "user").length }, "[usme] calling coreAssemble");
 
         const spreadingDepth = config.spreading?.maxDepth ?? 2;
         const spreadingPass = spreadingDepth > 0 ? {
@@ -313,7 +355,7 @@ export default function usmePlugin(api: {
         tiersQueried = result.metadata.tiersQueried as string[];
         tokensInjected = result.metadata.tokensUsed;
         _spreadingMetrics = (result.metadata as { spreadingMetrics?: { entitiesMatched: number; episodesAdded: number; spreadDepth: number } }).spreadingMetrics;
-        log.debug({ itemsSelected, itemsConsidered, tiersQueried, tokensInjected, spreadingEpisodesAdded: _spreadingMetrics?.episodesAdded ?? 0 }, "[usme] coreAssemble OK");
+        log.info({ phase: "assemble_success", sessionId, itemsSelected, itemsConsidered, tiersQueried, tokensInjected, spreadingEpisodesAdded: _spreadingMetrics?.episodesAdded ?? 0 }, "[usme] coreAssemble OK");
 
         // ── Load active constraints (outside token budget) ────────────────────────
         let constraintLines: string[] = [];
@@ -328,22 +370,22 @@ export default function usmePlugin(api: {
             (r: { pattern: string; content: string }) => `${r.pattern}: ${r.content}`,
           );
         } catch (constraintErr) {
-          log.warn({ err: constraintErr }, "[usme] constraints query failed (non-fatal)");
+          log.warn({ phase: "constraints_query", ...errMeta(constraintErr) }, "[usme] constraints query failed (non-fatal)");
         }
 
         if (result.items.length > 0 || constraintLines.length > 0) {
           contextBlock = injectedToSystemAddition(result.items, constraintLines);
-          log.debug({ contextBlockLength: contextBlock.length }, "[usme] contextBlock built");
+          log.info({ phase: "injection_context_built", sessionId, contextBlockLength: contextBlock.length, itemCount: result.items.length, constraintCount: constraintLines.length }, "[usme] contextBlock built");
           if (result.items.length > 0) {
             void bumpAccessCounts(pool, result.items).catch((err: unknown) => {
-              logger.warn({ err }, "[usme] bumpAccessCounts failed (non-fatal)");
+              logger.warn({ phase: "bump_access_counts", ...errMeta(err) }, "[usme] bumpAccessCounts failed (non-fatal)");
             });
           }
         } else {
-          log.debug("[usme] result.items empty — contextBlock will be empty");
+          log.info({ phase: "injection_context_empty", sessionId, reason: "no_items_or_constraints" }, "[usme] result.items empty - contextBlock will be empty");
         }
       } catch (err) {
-        log.error({ err }, "USME pipeline failed — skipping injection this turn");
+        log.error({ phase: "pipeline", sessionId, ...errMeta(err) }, "USME pipeline failed - skipping injection this turn");
         return undefined;
       }
 
@@ -351,6 +393,7 @@ export default function usmePlugin(api: {
 
       // ── Write structured injection log entry ──────────────────────────────
       log.info({
+        phase: "injection_result",
         type: "injection",
         sessionId,
         mode: effectiveMode,
@@ -365,12 +408,12 @@ export default function usmePlugin(api: {
         episodesAdded: _spreadingMetrics?.episodesAdded,
       }, "[usme] injection");
 
-      log.debug({ durationMs: Math.round(performance.now() - pipelineStart), injected: isActive && contextBlock.length > 0 }, "[usme] pipeline done");
+      log.debug({ phase: "pipeline_done", durationMs: Math.round(performance.now() - pipelineStart), injected: isActive && contextBlock.length > 0 }, "[usme] pipeline done");
 
       // ── Fire-and-forget extraction (fact + entity) ────────────────────────
       // Runs after retrieval so it never blocks injection. Uses the same
       // agentMessages already normalized above.
-      log.debug({ extractionEnabled: config.extraction?.enabled, hasAnthropicKey: !!anthropicKey }, "[usme] extraction check");
+      log.info({ phase: "extraction_check", sessionId, extractionEnabled: config.extraction?.enabled, anthropicApiKey: keyMeta(anthropicKey) }, "[usme] extraction check");
       if (config.extraction?.enabled && anthropicKey) {
         const serializedTurn = agentMessages
           .filter((m) => m.role === "user" || m.role === "assistant")
@@ -382,43 +425,56 @@ export default function usmePlugin(api: {
           .slice(-4)
           .join("\n\n");
 
-        log.debug({ serializedTurnLength: serializedTurn.length }, "[usme] serializedTurn");
+        log.debug({ serializedTurn: safePreview(serializedTurn) }, "[usme] serializedTurn");
         if (/\bHEARTBEAT\b/i.test(serializedTurn)) {
-          log.debug("[usme] extraction skipped: HEARTBEAT pattern");
+          log.info({ phase: "extraction_skip", sessionId, reason: "heartbeat_pattern" }, "[usme] extraction skipped");
           // fall through to injection return below
         } else if (serializedTurn) {
           const anthropicClient = new Anthropic({ apiKey: anthropicKey });
           const queue = getExtractionQueue();
-          log.debug({ model: config.extraction.model }, "[usme] enqueueing fact extraction");
-          queue.enqueue(async () => {
-            log.debug("[usme] runFactExtraction start");
+          log.info({ phase: "fact_extraction_enqueue", sessionId, model: config.extraction.model, serializedTurnLength: serializedTurn.length }, "[usme] enqueueing fact extraction");
+          void queue.enqueue(async () => {
+            log.info({ phase: "fact_extraction_start", sessionId }, "[usme] runFactExtraction start");
             try {
               await runFactExtraction(
                 anthropicClient, pool,
                 { sessionId, turnIndex: agentMessages.filter((m) => m.role === "user").length, serializedTurn },
                 { model: config.extraction.model, embeddingApiKey: config.embeddingApiKey || openaiKey },
               );
-              log.debug("[usme] runFactExtraction OK");
-            } catch (err) { log.error({ err }, "[usme] runFactExtraction failed"); }
+              log.info({ phase: "fact_extraction_success", sessionId }, "[usme] runFactExtraction OK");
+            } catch (err) { log.error({ phase: "fact_extraction", sessionId, ...errMeta(err) }, "[usme] runFactExtraction failed"); }
+          }).catch((err) => {
+            log.error({ phase: "fact_extraction_enqueue", sessionId, ...errMeta(err) }, "[usme] enqueue fact extraction failed");
           });
           const entityEnabled = config.extraction.entityExtraction?.enabled;
-          log.debug({ entityExtractionEnabled: entityEnabled }, "[usme] entity extraction check");
+          log.info({ phase: "entity_extraction_check", sessionId, entityExtractionEnabled: entityEnabled }, "[usme] entity extraction check");
           if (entityEnabled) {
-            queue.enqueue(async () => {
-              log.debug("[usme] runEntityExtraction start");
+            log.info({ phase: "entity_extraction_enqueue", sessionId, model: config.extraction.entityExtraction.model, serializedTurnLength: serializedTurn.length }, "[usme] enqueueing entity extraction");
+            void queue.enqueue(async () => {
+              log.info({ phase: "entity_extraction_start", sessionId }, "[usme] runEntityExtraction start");
               try {
                 await runEntityExtraction(
                   anthropicClient, pool,
                   serializedTurn,
                   { model: config.extraction.entityExtraction.model, embeddingApiKey: config.embeddingApiKey || openaiKey },
                 );
-                log.debug("[usme] runEntityExtraction OK");
-              } catch (err) { log.error({ err }, "[usme] runEntityExtraction failed"); }
+                log.info({ phase: "entity_extraction_success", sessionId }, "[usme] runEntityExtraction OK");
+              } catch (err) { log.error({ phase: "entity_extraction", sessionId, ...errMeta(err) }, "[usme] runEntityExtraction failed"); }
+            }).catch((err) => {
+              log.error({ phase: "entity_extraction_enqueue", sessionId, ...errMeta(err) }, "[usme] enqueue entity extraction failed");
             });
+          } else {
+            log.info({ phase: "entity_extraction_skip", sessionId, reason: "disabled" }, "[usme] entity extraction skipped");
           }
         } else {
-          log.debug("[usme] extraction skipped: serializedTurn empty");
+          log.info({ phase: "extraction_skip", sessionId, reason: "serialized_turn_empty" }, "[usme] extraction skipped");
         }
+      } else {
+        log.info({
+          phase: "extraction_skip",
+          sessionId,
+          reason: config.extraction?.enabled ? "missing_anthropic_api_key" : "disabled",
+        }, "[usme] extraction skipped");
       }
 
       // ── Inject context (active mode only) ────────────────────────────────
@@ -426,10 +482,18 @@ export default function usmePlugin(api: {
         // prependContext is injected into the prompt by OpenClaw before the
         // model sees the conversation. This is the correct field for
         // per-turn dynamic context (not prependSystemContext which is cached).
+        log.info({ phase: "injection_return", sessionId, injected: true, contextBlockLength: contextBlock.length }, "[usme] returning prependContext");
         return { prependContext: contextBlock };
       }
 
       // log-only: full pipeline ran, log written, no injection
+      log.info({
+        phase: "injection_return",
+        sessionId,
+        injected: false,
+        reason: isActive ? "empty_context_block" : "log_only_mode",
+        contextBlockLength: contextBlock.length,
+      }, "[usme] returning without injection");
       return undefined;
     },
     { priority: -5 },
@@ -442,7 +506,10 @@ export default function usmePlugin(api: {
     "before_message_write",
     (event) => {
       const ev = event as { message?: { content?: unknown } };
-      if (!ev.message) return;
+      if (!ev.message) {
+        log.debug({ phase: "before_message_write_exit", reason: "missing_message" }, "[usme] strip skipped");
+        return;
+      }
       const msg = ev.message as { content?: unknown };
 
       const strip = (s: string): string =>
@@ -451,6 +518,7 @@ export default function usmePlugin(api: {
       if (typeof msg.content === "string") {
         const cleaned = strip(msg.content);
         if (cleaned !== msg.content) {
+          log.info({ phase: "before_message_write_strip", contentType: "string", beforeLength: msg.content.length, afterLength: cleaned.length }, "[usme] stripped usme-context from message");
           return { message: { ...msg, content: cleaned } };
         }
       } else if (Array.isArray(msg.content)) {
@@ -466,11 +534,15 @@ export default function usmePlugin(api: {
           return part;
         });
         if (changed) {
+          log.info({ phase: "before_message_write_strip", contentType: "blocks", blockCount: msg.content.length }, "[usme] stripped usme-context from message blocks");
           return { message: { ...msg, content: newContent } };
         }
+      } else {
+        log.debug({ phase: "before_message_write_exit", reason: "unsupported_content_type", contentType: typeof msg.content }, "[usme] strip skipped");
       }
     },
   );
+  log.info({ phase: "hook_registration", event: "before_message_write" }, "[usme] hook registration");
 
   // ── CLI command registration ──────────────────────────────────────────────
   api.registerCommand?.({
@@ -480,25 +552,38 @@ export default function usmePlugin(api: {
     requireAuth: false,
     async handler(ctx: { commandBody?: string }) {
       const args = (ctx.commandBody ?? "").trim().split(/\s+/).filter(Boolean);
+      log.info({ phase: "reflect_command_entry", argCount: args.length, args: args.map((arg) => arg.startsWith("--") ? arg : "[value]") }, "[usme] reflect command invoked");
       try {
         await reflectCommand(args);
+        log.info({ phase: "reflect_command_success" }, "[usme] reflect command complete");
         return { text: "Reflection complete. Check logs for details." };
       } catch (err) {
-        log.error({ err }, "reflect command failed");
+        log.error({ phase: "reflect_command", ...errMeta(err) }, "reflect command failed");
         return { text: `Reflection failed: ${err instanceof Error ? err.message : String(err)}` };
       }
     },
   });
+  log.info({ phase: "command_registration", command: "usme-reflect" }, "[usme] command registered");
 
   // ── Graceful shutdown ──────────────────────────────────────────────────────
   api.registerService?.({
     id: "usme-pool",
-    start: () => {},
+    start: () => {
+      log.info({ phase: "service_start", service: "usme-pool" }, "[usme] service start");
+    },
     stop: async () => {
-      await _schedulerHandle?.stop();
-      _schedulerHandle = null;
-      await getExtractionQueue().drain();
-      await closePool();
+      log.info({ phase: "service_stop_start", service: "usme-pool", hasScheduler: !!_schedulerHandle }, "[usme] service stop starting");
+      try {
+        await _schedulerHandle?.stop();
+        _schedulerHandle = null;
+        await getExtractionQueue().drain();
+        await closePool();
+        log.info({ phase: "service_stop_success", service: "usme-pool" }, "[usme] service stop complete");
+      } catch (err) {
+        log.error({ phase: "service_stop", service: "usme-pool", ...errMeta(err) }, "[usme] service stop failed");
+        throw err;
+      }
     },
   });
+  log.info({ phase: "service_registration", service: "usme-pool" }, "[usme] service registered");
 }

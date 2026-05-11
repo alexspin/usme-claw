@@ -3,7 +3,7 @@ Use the ruflo MCP swarm to refactor the USME reflection pipeline and add a graph
 Environment notes:
 - Working directory: /home/alex/ai/projects/rufus-projects/usme-claw/
 - Packages: packages/usme-core/ (library), packages/usme-openclaw/ (openclaw plugin, owns the build)
-- Build command: npm run build from packages/usme-openclaw/ (esbuild, outputs to ~/.openclaw/extensions/usme-claw/dist/plugin.js)
+- Build command: npm run build from packages/usme-openclaw/ (esbuild, outputs to $OPENCLAW_EXTENSIONS_DIR/usme-claw/dist/plugin.js, normally /home/alex/ai/projects/.openclaw/extensions/usme-claw/dist/plugin.js)
 - TypeScript, ESM throughout
 - Database: postgres://usme:usme_dev@localhost:5432/usme
 - Do NOT touch: nightly.ts, promote.ts, reconcile.ts, index.ts, packages/usme-openclaw/

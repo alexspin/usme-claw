@@ -7,7 +7,15 @@ import { runReflection } from "@usme/core";
 import { getPool } from "@usme/core";
 import { DEFAULT_FAST_MODEL, DEFAULT_REASONING_MODEL } from "@usme/core/config/models";
 
+function reflectLog(event: string, fields: Record<string, unknown>): void {
+  console.error(JSON.stringify({ component: "usme", module: "openclaw-reflect-command", event, ...fields }));
+}
+
 export async function reflectCommand(args: string[]): Promise<void> {
+  reflectLog("reflect_command_entry", {
+    argCount: args.length,
+    args: args.map((arg) => arg.startsWith("--") ? arg : "[value]"),
+  });
   // Parse flags
   let model: string | undefined;
   let dryRun = false;
@@ -44,6 +52,7 @@ export async function reflectCommand(args: string[]): Promise<void> {
 
   // --status: show last reflection run
   if (statusMode) {
+    reflectLog("reflect_command_status", {});
     const { rows } = await pool.query(
       `SELECT * FROM reflection_runs ORDER BY triggered_at DESC LIMIT 1`,
     );
@@ -70,6 +79,7 @@ export async function reflectCommand(args: string[]): Promise<void> {
 
   // --last N: show last N reflection runs
   if (lastN !== undefined) {
+    reflectLog("reflect_command_last", { lastN });
     const { rows } = await pool.query(
       `SELECT * FROM reflection_runs ORDER BY triggered_at DESC LIMIT $1`,
       [lastN],
@@ -90,15 +100,39 @@ export async function reflectCommand(args: string[]): Promise<void> {
   console.log(`Running memory reflection${dryRun ? ' (dry run)' : ''}...`);
   const start = Date.now();
 
-  const result = await runReflection({
-    model,
+  let result: Awaited<ReturnType<typeof runReflection>>;
+  try {
+    result = await runReflection({
+      model,
+      dryRun,
+      verbose,
+      tier,
+      triggerSource: 'cli',
+    });
+  } catch (err) {
+    reflectLog("reflect_command_failure", {
+      dryRun,
+      verbose,
+      tier,
+      model,
+      errMessage: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
+
+  const elapsed = Date.now() - start;
+  reflectLog("reflect_command_success", {
     dryRun,
     verbose,
     tier,
-    triggerSource: 'cli',
+    model,
+    elapsedMs: elapsed,
+    runId: result.runId,
+    conceptsUpdated: result.changes.conceptsUpdated,
+    skillsCreated: result.changes.skillsCreated,
+    contradictionsResolved: result.changes.contradictionsResolved,
+    entitiesUpdated: result.changes.entitiesUpdated,
   });
-
-  const elapsed = Date.now() - start;
   console.log(`Reflection complete in ${elapsed}ms`);
   console.log(`  Run ID: ${result.runId}`);
   console.log(`  Concepts updated: ${result.changes.conceptsUpdated}`);

@@ -12,7 +12,10 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { logger } from "@usme/core";
 import type { InjectedMemory, MemoryTier } from "@usme/core";
+
+const log = logger.child({ module: "openclaw-telemetry" });
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -57,7 +60,7 @@ export interface TelemetryItem {
   similarityScore: number;
   compositeScore: number;
   tokenCount: number;
-  /** First 500 chars of content for readability; full content if shorter. */
+  /** First 120 chars of content for readability. */
   contentPreview: string;
 }
 
@@ -93,7 +96,7 @@ function ensureLogDir(): void {
 
 /**
  * Append a telemetry record to the log file (fire-and-forget, non-blocking).
- * Silently swallows write errors to preserve graceful degradation.
+ * Logs and swallows write errors to preserve graceful degradation.
  */
 export function writeTelemetry(record: TelemetryRecord): void {
   if (!isTelemetryEnabled()) return;
@@ -101,8 +104,9 @@ export function writeTelemetry(record: TelemetryRecord): void {
     ensureLogDir();
     const line = JSON.stringify(record) + "\n";
     fs.appendFileSync(LOG_FILE, line, "utf8");
-  } catch {
-    // Silently swallow: telemetry must never affect the hot path
+    log.debug({ phase: "telemetry_append_success", logFile: LOG_FILE, sessionId: record.sessionId }, "[usme] telemetry append success");
+  } catch (err) {
+    log.error({ phase: "telemetry_append_failure", logFile: LOG_FILE, sessionId: record.sessionId, err }, "[usme] telemetry append failed");
   }
 }
 
@@ -120,7 +124,7 @@ export function itemsToTelemetry(items: InjectedMemory[]): TelemetryItem[] {
     similarityScore: item.score,  // composite score post-pack
     compositeScore: item.score,
     tokenCount: item.tokenCount,
-    contentPreview: item.content.slice(0, 500),
+    contentPreview: item.content.replace(/\s+/g, " ").slice(0, 120),
   }));
 }
 
