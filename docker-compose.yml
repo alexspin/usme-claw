@@ -7,7 +7,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-usme}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-usme_dev}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_BIND:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - usme_data:/var/lib/postgresql/data
     restart: unless-stopped

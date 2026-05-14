@@ -1,7 +1,7 @@
 # USME Project Status
 
 **Stage:** SHIP (deployed, operational)
-**Last updated:** 2026-04-23
+**Last updated:** 2026-05-13
 **Owner:** Alex
 
 ---
@@ -28,6 +28,8 @@
 | HEARTBEAT noise filter | ✅ Live | critic.ts + extraction guard in index.ts |
 | before_message_write hook | ✅ Live | Strips <usme-context> blocks before transcript storage |
 | **Phase 1 security hardening** | ✅ **Complete** | P1-1 through P1-9 shipped 2026-04-23 (see below) |
+| NGINX host routing | ✅ Updated | `collective7.spinelli5.com` now uses neutral canonical NGINX site config, not enabled `code-server` config |
+| PostgreSQL exposure | ⚠️ Needs root firewall or container recreation | Future config now binds to localhost; currently running `usme-db` was created without a data volume and still publishes `5432` publicly until blocked at firewall or migrated safely. |
 
 ### Phase 1 security hardening (shipped 2026-04-23)
 
@@ -61,6 +63,7 @@
 
 - **PostgreSQL:** 2909 sensory traces, 222 episodes, 212 concepts, 983 entities, 137 skill candidates
 - **Dashboard:** Port 3456, behind NGINX at collective7.spinelli5.com/usme/
+- **NGINX:** Main host router is `/etc/nginx/sites-available/collective7.spinelli5.com`; shared upstreams are in `/etc/nginx/conf.d/00-local-upstreams.conf`; runbook is `rufus-plugin/docs/OPERATIONS_NGINX_ROUTING.md`.
 - **Process manager:** PM2 `ecosystem.config.js` + systemd unit (`usme-dashboard.service`) in usme-dashboard repo
 - **Model config:** `USME_FAST_MODEL`, `USME_REASONING_MODEL`, `USME_EMBEDDING_MODEL` env vars override openclaw.json plugin config
 
@@ -110,7 +113,8 @@ Candidates from reflect runs before commit f17b306 have `source_episode_ids = nu
 - **P1-1 git history rewrite** — Private key in commit 91ed5a2 still in git history. Requires explicit owner approval to proceed.
 - **P1-9 process manager** — ✅ Complete. ecosystem.config.js + usme-dashboard.service added to usme-dashboard repo.
 - **Hardcoded paths in usme-core** — `promote.ts` and `promote-candidate.ts` still have `/home/alex/` paths. Only usme-dashboard was remediated in P1-4.
-- **Port 3747** — Old rufus-plugin standalone dashboard (PID 1761055) still running. Decommission pending decision.
+- **Dashboard process supervision** — verify only the unified dashboard is managed for public routing.
+- **Rufus explainer path** — `/rufusexplained/` should be an explicit static NGINX route from `rufus-presentation/site`; without that route it falls through to code-server.
 - **Parent workspace submodule pointer** — Ruflo-Claw-Swarm has uncommitted changes; usme submodule pointer not yet committed.
 
 ### Phase 2 items (next)

@@ -22,7 +22,7 @@ case "$status" in
       -e POSTGRES_DB=usme \
       -e POSTGRES_USER=usme \
       -e POSTGRES_PASSWORD=usme_dev \
-      -p 5432:5432 \
+      -p 127.0.0.1:5432:5432 \
       --restart unless-stopped \
       "$IMAGE"
     ;;
@@ -34,7 +34,7 @@ case "$status" in
       -e POSTGRES_DB=usme \
       -e POSTGRES_USER=usme \
       -e POSTGRES_PASSWORD=usme_dev \
-      -p 5432:5432 \
+      -p 127.0.0.1:5432:5432 \
       --restart unless-stopped \
       "$IMAGE"
     ;;
