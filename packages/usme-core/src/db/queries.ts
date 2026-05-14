@@ -161,19 +161,21 @@ export async function insertEntity(
 export async function insertEntityRelationship(
   pool: pg.Pool,
   rel: Omit<EntityRelationship, "id" | "created_at">,
-): Promise<string> {
+): Promise<string | null> {
   const { rows } = await pool.query(
     `INSERT INTO entity_relationships
        (source_id, target_id, relationship, confidence, source_item_id,
         valid_from, valid_until, metadata)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+     ON CONFLICT ON CONSTRAINT uq_entity_rel_active DO NOTHING
      RETURNING id`,
     [
       rel.source_id, rel.target_id, rel.relationship, rel.confidence,
       rel.source_item_id, rel.valid_from, rel.valid_until, rel.metadata,
     ],
   );
-  return rows[0].id;
+  // Returns null when the relationship already exists (active duplicate); caller should not treat as error.
+  return rows[0]?.id ?? null;
 }
 
 // ── Shadow Comparisons ──────────────────────────────────────

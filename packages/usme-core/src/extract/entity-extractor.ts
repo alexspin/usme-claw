@@ -255,7 +255,7 @@ export async function persistEntities(
       continue;
     }
 
-    await insertEntityRelationship(pool, {
+    const insertedId = await insertEntityRelationship(pool, {
       source_id: sourceId,
       target_id: targetId,
       relationship: rel.relationship,
@@ -266,7 +266,7 @@ export async function persistEntities(
       metadata: {},
     });
 
-    insertedRelationships++;
+    if (insertedId) insertedRelationships++;
   }
 
   log.info(
