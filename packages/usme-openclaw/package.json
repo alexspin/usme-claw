@@ -6,7 +6,7 @@
   "types": "dist/plugin.d.ts",
   "scripts": {
     "build": "tsc --noEmit && esbuild src/index.ts --bundle --platform=node --format=cjs --outfile=../../../../.openclaw/extensions/usme-claw/dist/plugin.cjs",
-    "postbuild": "cp openclaw.plugin.json ../../../../.openclaw/extensions/usme-claw/openclaw.plugin.json && cp ../../node_modules/tiktoken/tiktoken_bg.wasm ../../../../.openclaw/extensions/usme-claw/dist/tiktoken_bg.wasm && node -e \"require('fs').writeFileSync('../../../../.openclaw/extensions/usme-claw/package.json', JSON.stringify({name:'usme-claw',version:'0.1.0',type:'commonjs',main:'dist/plugin.cjs',openclaw:{extensions:['./dist/plugin.cjs']}}, null, 2))\" && node scripts/patch-lcm-sqlite.mjs && node scripts/patch-claude-flow-oauth.mjs",
+    "postbuild": "cp openclaw.plugin.json ../../../../.openclaw/extensions/usme-claw/openclaw.plugin.json && cp ../../node_modules/tiktoken/tiktoken_bg.wasm ../../../../.openclaw/extensions/usme-claw/dist/tiktoken_bg.wasm && node -e \"require('fs').writeFileSync('../../../../.openclaw/extensions/usme-claw/package.json', JSON.stringify({name:'usme-claw',version:'0.1.0',type:'commonjs',main:'dist/plugin.cjs',openclaw:{extensions:['./dist/plugin.cjs']}}, null, 2))\" && node scripts/patch-claude-flow-oauth.mjs",
     "test": "vitest run"
   },
   "openclaw": {
