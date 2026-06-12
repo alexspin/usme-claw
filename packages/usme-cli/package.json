@@ -1,0 +1,19 @@
+{
+  "name": "@usme/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "usme": "./src/cli.ts"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "test": "vitest run",
+    "usme": "tsx src/cli.ts"
+  },
+  "dependencies": {
+    "@usme/core": "*",
+    "usme-claw": "*",
+    "pg": "^8.12"
+  }
+}
