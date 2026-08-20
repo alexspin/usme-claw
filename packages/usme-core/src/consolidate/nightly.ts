@@ -10,7 +10,7 @@
  * Each step is idempotent — safe to re-run.
  */
 
-import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 import { z } from "zod";
 import type pg from "pg";
 import {
@@ -26,6 +26,7 @@ import type { SensoryTrace } from "../schema/types.js";
 import { logger } from "../logger.js";
 import { countTokens } from "../tokenize.js";
 import { DEFAULT_REASONING_MODEL, DEFAULT_FAST_MODEL } from "../config/models.js";
+import { callOpenAITool, callOpenAIText } from "../llm/openai-tool.js";
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -87,12 +88,6 @@ const ContradictionOutputSchema = z.object({
 
 // ── Helpers ────────────────────────────────────────────────
 
-function extractToolInput(response: Anthropic.Message, toolName: string): unknown {
-  const block = response.content.find((b): b is Anthropic.ToolUseBlock => b.type === "tool_use" && b.name === toolName);
-  if (!block) throw new Error(`No tool_use block with name "${toolName}" in response`);
-  return block.input;
-}
-
 function chunkArray<T>(arr: T[], k: number): T[][] {
   const chunkSize = Math.ceil(arr.length / k);
   const chunks: T[][] = [];
@@ -110,7 +105,7 @@ function chunkArray<T>(arr: T[], k: number): T[][] {
  * Dynamic k: 1 episode per ~15 traces, minimum 1 (D13).
  */
 export async function stepEpisodify(
-  client: Anthropic,
+  client: OpenAI,
   pool: pg.Pool,
   config: NightlyConfig,
 ): Promise<number> {
@@ -144,30 +139,24 @@ export async function stepEpisodify(
         .map((t) => `[${t.memory_type ?? "unknown"}] ${t.content}`)
         .join("\n");
 
-      const response = await client.messages.create({
+      const summary = await callOpenAIText({
+        client,
         model: config.sonnetModel ?? DEFAULT_REASONING_MODEL,
-        max_tokens: 1024,
-        messages: [
-          {
-            role: "user",
-            content: `Summarize the following extracted memory items into a single cohesive episode summary. Focus on what happened, decisions made, and key facts learned. Be concise but complete.\n\nItems:\n${serialized}\n\nRespond with only the summary text, no JSON or formatting.`,
-          },
-        ],
+        maxTokens: 1024,
+        prompt: `Summarize the following extracted memory items into a single cohesive episode summary. Focus on what happened, decisions made, and key facts learned. Be concise but complete.\n\nItems:\n${serialized}\n\nRespond with only the summary text, no JSON or formatting.`,
       });
-
-      const summary =
-        response.content[0].type === "text" ? response.content[0].text : "";
 
       const timeBucket = chunk[0].created_at;
 
-      // Assign importance_score via Haiku tool_use call
+      // Assign importance_score via fast-model tool call
       let importance_score = 5;
       try {
         const importanceStart = Date.now();
-        const importanceResponse = await client.messages.create({
+        const { output } = await callOpenAITool({
+          client,
           model: DEFAULT_FAST_MODEL,
-          max_tokens: 256,
-          tools: [{
+          maxTokens: 256,
+          tool: {
             name: "assign_importance",
             description: "Assign an importance score to a memory episode",
             input_schema: {
@@ -180,16 +169,10 @@ export async function stepEpisodify(
               },
               required: ["importance_score"],
             },
-          }],
-          tool_choice: { type: "tool", name: "assign_importance" },
-          messages: [
-            {
-              role: "user",
-              content: `Assign an importance score (1-10) to this memory episode:\n\n${summary}`,
-            },
-          ],
+          },
+          prompt: `Assign an importance score (1-10) to this memory episode:\n\n${summary}`,
         });
-        const importanceResult = ImportanceSchema.safeParse(extractToolInput(importanceResponse, "assign_importance"));
+        const importanceResult = ImportanceSchema.safeParse(output);
         if (importanceResult.success) {
           importance_score = Math.round(importanceResult.data.importance_score);
         } else {
@@ -198,7 +181,7 @@ export async function stepEpisodify(
         const duration = Date.now() - importanceStart;
         log.info({ importance_score, duration }, "episode importance scored");
       } catch (err) {
-        log.error({ err }, "stepEpisodify: Haiku importance call failed, defaulting to 5");
+        log.error({ err }, "stepEpisodify: importance-scoring call failed, defaulting to 5");
         importance_score = 5;
       }
 
@@ -242,7 +225,7 @@ export async function stepEpisodify(
  * Identify recurring patterns across episodes and promote to stable concepts.
  */
 export async function stepPromote(
-  client: Anthropic,
+  client: OpenAI,
   pool: pg.Pool,
   config: NightlyConfig,
 ): Promise<number> {
@@ -264,10 +247,11 @@ export async function stepPromote(
     .map((e: { id: string; summary: string }, i: number) => `[${i + 1}] ${e.summary}`)
     .join("\n\n");
 
-  const response = await client.messages.create({
+  const { output } = await callOpenAITool({
+    client,
     model: config.sonnetModel ?? DEFAULT_REASONING_MODEL,
-    max_tokens: 8192,
-    tools: [{
+    maxTokens: 8192,
+    tool: {
       name: "promote_concepts",
       description: "Extract recurring facts, preferences, or decisions worth promoting to long-term concepts.",
       input_schema: {
@@ -291,17 +275,11 @@ export async function stepPromote(
         },
         required: ["concepts"],
       },
-    }],
-    tool_choice: { type: "tool", name: "promote_concepts" },
-    messages: [
-      {
-        role: "user",
-        content: `Analyze these episode summaries and extract up to 10 of the most important recurring facts, preferences, or decisions that should be promoted to stable long-term concepts. Keep each "content" field under 200 characters. If no concepts are worth promoting, return an empty array.\n\nEpisodes:\n${serialized}`,
-      },
-    ],
+    },
+    prompt: `Analyze these episode summaries and extract up to 10 of the most important recurring facts, preferences, or decisions that should be promoted to stable long-term concepts. Keep each "content" field under 200 characters. If no concepts are worth promoting, return an empty array.\n\nEpisodes:\n${serialized}`,
   });
 
-  const promoteResult = PromoteOutputSchema.safeParse(extractToolInput(response, "promote_concepts"));
+  const promoteResult = PromoteOutputSchema.safeParse(output);
   if (!promoteResult.success) {
     log.error({ error: promoteResult.error }, "stepPromote: schema validation failed");
     return 0;
@@ -360,7 +338,7 @@ export async function stepPromote(
  * and resolve via Sonnet.
  */
 export async function stepContradictions(
-  client: Anthropic,
+  client: OpenAI,
   pool: pg.Pool,
   config: NightlyConfig,
 ): Promise<number> {
@@ -388,34 +366,29 @@ export async function stepContradictions(
   let resolved = 0;
 
   for (const pair of candidates) {
-    const response = await client.messages.create({
-      model: config.sonnetModel ?? DEFAULT_REASONING_MODEL,
-      max_tokens: 1024,
-      tools: [{
-        name: "resolve_contradiction",
-        description: "Analyze two memory concepts and decide how to resolve any contradiction between them.",
-        input_schema: {
-          type: "object" as const,
-          properties: {
-            contradicts: { type: "boolean" },
-            resolution: { type: "string", enum: ["keep_a", "keep_b", "merge"] },
-            merged_content: { type: ["string", "null"], description: "Merged statement if resolution is merge, otherwise null" },
-            reasoning: { type: "string" },
-          },
-          required: ["contradicts", "resolution", "merged_content", "reasoning"],
-        },
-      }],
-      tool_choice: { type: "tool", name: "resolve_contradiction" },
-      messages: [
-        {
-          role: "user",
-          content: `These two memory concepts may contradict each other. Analyze and decide:\n\nConcept A: "${pair.content_a}"\nConcept B: "${pair.content_b}"`,
-        },
-      ],
-    });
-
     try {
-      const contradictionResult = ContradictionOutputSchema.safeParse(extractToolInput(response, "resolve_contradiction"));
+      const { output } = await callOpenAITool({
+        client,
+        model: config.sonnetModel ?? DEFAULT_REASONING_MODEL,
+        maxTokens: 1024,
+        tool: {
+          name: "resolve_contradiction",
+          description: "Analyze two memory concepts and decide how to resolve any contradiction between them.",
+          input_schema: {
+            type: "object" as const,
+            properties: {
+              contradicts: { type: "boolean" },
+              resolution: { type: "string", enum: ["keep_a", "keep_b", "merge"] },
+              merged_content: { type: ["string", "null"], description: "Merged statement if resolution is merge, otherwise null" },
+              reasoning: { type: "string" },
+            },
+            required: ["contradicts", "resolution", "merged_content", "reasoning"],
+          },
+        },
+        prompt: `These two memory concepts may contradict each other. Analyze and decide:\n\nConcept A: "${pair.content_a}"\nConcept B: "${pair.content_b}"`,
+      });
+
+      const contradictionResult = ContradictionOutputSchema.safeParse(output);
       if (!contradictionResult.success) {
         log.error({ error: contradictionResult.error }, "stepContradictions: schema validation failed");
         continue;
@@ -487,7 +460,7 @@ export async function stepContradictions(
  */
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 export async function stepSkillDraft(
-  _client: Anthropic,
+  _client: OpenAI,
   _pool: pg.Pool,
   _config: NightlyConfig,
 ): Promise<number> {
@@ -565,7 +538,7 @@ export async function stepDecayAndPrune(
  * Each step is independent and idempotent.
  */
 export async function runNightlyConsolidation(
-  client: Anthropic,
+  client: OpenAI,
   pool: pg.Pool,
   config: NightlyConfig = {},
 ): Promise<NightlyResult> {
@@ -604,7 +577,7 @@ export async function runNightlyConsolidation(
  * No decay, no skill drafting.
  */
 export async function runPartialConsolidation(
-  client: Anthropic,
+  client: OpenAI,
   pool: pg.Pool,
   config: NightlyConfig = {},
 ): Promise<{ runId: string; episodesCreated: number; conceptsPromoted: number; conceptsReconciled: number }> {

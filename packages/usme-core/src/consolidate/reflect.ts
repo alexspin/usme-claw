@@ -1,11 +1,12 @@
 /**
  * Memory Reflection Service — thin orchestrator.
  *
- * Assembles the full memory corpus, sends to Claude Sonnet via tool_use,
+ * Assembles the full memory corpus, sends it to the configured reflection provider,
  * and applies structured updates across all memory tiers in a single transaction.
  */
 
 import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 import { z } from "zod";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { getPool } from "../db/pool.js";
@@ -124,7 +125,29 @@ const ReflectionOutputSchema = z.object({
 
 // ── Helpers ────────────────────────────────────────────────
 
-function extractToolInput(response: Anthropic.Message, toolName: string): unknown {
+type ReflectionProvider = "openai" | "anthropic";
+const DEFAULT_OPENAI_REFLECTION_MODEL = process.env.USME_OPENAI_REFLECTION_MODEL ?? DEFAULT_REASONING_MODEL;
+// Independent of DEFAULT_REASONING_MODEL (which is OpenAI-shaped) so opting back
+// into USME_REFLECTION_PROVIDER=anthropic doesn't send an OpenAI model id to Anthropic's API.
+const DEFAULT_ANTHROPIC_REFLECTION_MODEL = process.env.USME_ANTHROPIC_REFLECTION_MODEL ?? "claude-sonnet-4-6";
+
+function getReflectionProvider(): ReflectionProvider {
+  const provider = process.env.USME_REFLECTION_PROVIDER ?? "openai";
+  if (provider === "openai" || provider === "anthropic") return provider;
+  throw new Error(`Invalid USME_REFLECTION_PROVIDER "${provider}" — expected "openai" or "anthropic"`);
+}
+
+function normalizeModelForProvider(model: string, provider: ReflectionProvider): string {
+  if (provider === "openai") return model.replace(/^openai\//, "");
+  return model.replace(/^anthropic\//, "");
+}
+
+function selectReflectionModel(optsModel: string | undefined, provider: ReflectionProvider): string {
+  const model = optsModel ?? (provider === "openai" ? DEFAULT_OPENAI_REFLECTION_MODEL : DEFAULT_ANTHROPIC_REFLECTION_MODEL);
+  return normalizeModelForProvider(model, provider);
+}
+
+function extractAnthropicToolInput(response: Anthropic.Message, toolName: string): unknown {
   const block = response.content.find(
     (b): b is Anthropic.ToolUseBlock => b.type === "tool_use" && b.name === toolName,
   );
@@ -132,14 +155,96 @@ function extractToolInput(response: Anthropic.Message, toolName: string): unknow
   return block.input;
 }
 
+function extractOpenAIToolInput(
+  response: OpenAI.Chat.Completions.ChatCompletion,
+  toolName: string,
+): unknown {
+  const toolCall = response.choices[0]?.message?.tool_calls?.find(
+    (call) => call.type === "function" && call.function.name === toolName,
+  );
+  const args = toolCall?.function.arguments;
+  if (!args) throw new Error(`No OpenAI tool call arguments for "${toolName}" in response`);
+
+  try {
+    return JSON.parse(args) as unknown;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`OpenAI tool call arguments for "${toolName}" were not valid JSON: ${msg}`);
+  }
+}
+
+async function runReflectionLLM(params: {
+  provider: ReflectionProvider;
+  model: string;
+  prompt: string;
+  tools: object[];
+}): Promise<{
+  rawOutput: Record<string, unknown>;
+  inputTokens?: number;
+  outputTokens?: number;
+}> {
+  const { provider, model, prompt, tools } = params;
+
+  if (provider === "anthropic") {
+    const anthropicKey = process.env.ANTHROPIC_API_KEY ?? "";
+    if (!anthropicKey) throw new Error("ANTHROPIC_API_KEY not set — cannot run reflection with Anthropic");
+
+    const client = new Anthropic({ apiKey: anthropicKey });
+    const response = await client.messages.create({
+      model,
+      max_tokens: 16000,
+      tools: tools as Parameters<typeof client.messages.create>[0]['tools'],
+      tool_choice: { type: "tool", name: "reflection_output" },
+      messages: [{ role: "user", content: prompt }],
+    });
+
+    return {
+      rawOutput: extractAnthropicToolInput(response, "reflection_output") as Record<string, unknown>,
+      inputTokens: response.usage?.input_tokens,
+      outputTokens: response.usage?.output_tokens,
+    };
+  }
+
+  const openaiKey = process.env.OPENAI_API_KEY ?? "";
+  if (!openaiKey) throw new Error("OPENAI_API_KEY not set — cannot run reflection with OpenAI");
+
+  const client = new OpenAI({ apiKey: openaiKey });
+  const reflectionTool = tools[0] as {
+    name: string;
+    description?: string;
+    input_schema: Record<string, unknown>;
+  };
+  const response = await client.chat.completions.create({
+    model,
+    max_completion_tokens: 16000,
+    tools: [{
+      type: "function",
+      function: {
+        name: reflectionTool.name,
+        description: reflectionTool.description,
+        parameters: reflectionTool.input_schema,
+      },
+    }],
+    tool_choice: { type: "function", function: { name: "reflection_output" } },
+    messages: [{ role: "user", content: prompt }],
+  });
+
+  return {
+    rawOutput: extractOpenAIToolInput(response, "reflection_output") as Record<string, unknown>,
+    inputTokens: response.usage?.prompt_tokens,
+    outputTokens: response.usage?.completion_tokens,
+  };
+}
+
 // ── Main export ────────────────────────────────────────────
 
 export async function runReflection(opts: ReflectionOptions): Promise<ReflectionResult> {
   const start = Date.now();
-  const model = opts.model ?? DEFAULT_REASONING_MODEL;
+  const provider = getReflectionProvider();
+  const model = selectReflectionModel(opts.model, provider);
   const pool = getPool();
 
-  log.info({ triggerSource: opts.triggerSource, model, dryRun: opts.dryRun }, "reflection starting");
+  log.info({ triggerSource: opts.triggerSource, provider, model, dryRun: opts.dryRun }, "reflection starting");
 
   // ── Phase 1: Fetch corpus ──────────────────────────────
   const fetchStart = Date.now();
@@ -168,11 +273,6 @@ export async function runReflection(opts: ReflectionOptions): Promise<Reflection
   // ── Phase 2: Build prompt + call LLM ──────────────────
   const prompt = buildMainPrompt(corpus, slugTexts, activeConstraints);
   const tools = buildReflectionToolSchema();
-
-  const anthropicKey = process.env.ANTHROPIC_API_KEY ?? "";
-  if (!anthropicKey) throw new Error("ANTHROPIC_API_KEY not set — cannot run reflection");
-
-  const client = new Anthropic({ apiKey: anthropicKey });
   const llmStart = Date.now();
 
   log.debug(
@@ -180,22 +280,13 @@ export async function runReflection(opts: ReflectionOptions): Promise<Reflection
     "reflect llm input",
   );
 
-  const response = await client.messages.create({
-    model,
-    max_tokens: 16000,
-    tools: tools as Parameters<typeof client.messages.create>[0]['tools'],
-    tool_choice: { type: "tool", name: "reflection_output" },
-    messages: [{ role: "user", content: prompt }],
-  });
+  const { rawOutput, inputTokens, outputTokens } = await runReflectionLLM({ provider, model, prompt, tools });
 
   const llmDurationMs = Date.now() - llmStart;
-  const inputTokens = response.usage?.input_tokens;
-  const outputTokens = response.usage?.output_tokens;
 
-  log.info({ model, inputTokens, outputTokens, durationMs: llmDurationMs }, "reflection llm_call complete");
+  log.info({ provider, model, inputTokens, outputTokens, durationMs: llmDurationMs }, "reflection llm_call complete");
 
   // ── Phase 3: Normalize + parse ─────────────────────────
-  const rawOutput = extractToolInput(response, "reflection_output") as Record<string, unknown>;
 
   log.debug({ rawNewSkills: rawOutput.new_skills }, "reflect llm raw new_skills (before remap)");
 

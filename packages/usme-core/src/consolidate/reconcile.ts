@@ -1,6 +1,5 @@
-import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 import { z } from "zod";
-import { destr } from "destr";
 import type pg from "pg";
 import {
   getUnreconciledConcepts,
@@ -16,6 +15,8 @@ import { embedText, parseEmbeddingSafe } from "../embed/index.js";
 import type { NightlyConfig } from "./nightly.js";
 import type { Concept } from "../schema/types.js";
 import { logger } from "../logger.js";
+import { callOpenAITool } from "../llm/openai-tool.js";
+import { DEFAULT_REASONING_MODEL } from "../config/models.js";
 
 const log = logger.child({ module: "reconcile" });
 
@@ -68,7 +69,7 @@ Rules:
 }
 
 export async function stepReconcile(
-  client: Anthropic,
+  client: OpenAI,
   pool: pg.Pool,
   config: NightlyConfig,
   runId: string,
@@ -88,7 +89,7 @@ export async function stepReconcile(
 
   log.info(`Reconciling ${concepts.length} concepts`);
 
-  const model = (config as NightlyConfig & { reconciliationModel?: string }).reconciliationModel ?? "claude-sonnet-4-6";
+  const model = (config as NightlyConfig & { reconciliationModel?: string }).reconciliationModel ?? DEFAULT_REASONING_MODEL;
   let nonNoopCount = 0;
 
   for (const concept of concepts) {
@@ -113,13 +114,14 @@ export async function stepReconcile(
       continue;
     }
 
-    // Call Sonnet for reconciliation decision via tool_use
+    // Call reasoning model for reconciliation decision via forced tool call
     let decision: ReconcileDecision;
     try {
-      const response = await client.messages.create({
+      const { output } = await callOpenAITool({
+        client,
         model,
-        max_tokens: 1024,
-        tools: [{
+        maxTokens: 1024,
+        tool: {
           name: "reconcile_decision",
           description: "Decide how to reconcile a new memory concept against existing ones.",
           input_schema: {
@@ -134,26 +136,11 @@ export async function stepReconcile(
             },
             required: ["operation", "target_id", "updated_content", "reasoning", "confidence"],
           },
-        }],
-        tool_choice: { type: "tool", name: "reconcile_decision" },
-        messages: [{ role: "user", content: buildPrompt(concept, candidates) }],
+        },
+        prompt: buildPrompt(concept, candidates),
       });
 
-      const toolBlock = response.content.find((b) => b.type === "tool_use");
-      if (!toolBlock || toolBlock.type !== "tool_use") {
-        log.warn({ conceptId: concept.id }, "no tool_use block in reconcile response");
-        await insertAuditEntry(pool, {
-          run_id: runId,
-          operation: "parse_error",
-          concept_type: concept.concept_type,
-          new_concept_id: concept.id,
-          model_used: model,
-        });
-        await markConceptReconciled(pool, concept.id);
-        continue;
-      }
-
-      const parsed = ReconcileDecisionSchema.safeParse(destr(toolBlock.input));
+      const parsed = ReconcileDecisionSchema.safeParse(output);
       if (!parsed.success) {
         log.error({ error: parsed.error, conceptId: concept.id }, "reconcile schema validation failed");
         await insertAuditEntry(pool, {

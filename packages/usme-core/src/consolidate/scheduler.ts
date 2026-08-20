@@ -4,7 +4,7 @@
  * Uses pg-boss for persistent, DB-backed scheduling.
  */
 
-import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 import type pg from "pg";
 import { runNightlyConsolidation, stepEpisodify } from "./nightly.js";
 import type { NightlyConfig, NightlyResult } from "./nightly.js";
@@ -17,7 +17,6 @@ import {
   markCandidatesPrompted,
 } from "./promote.js";
 import { logger } from "../logger.js";
-import { DEFAULT_REASONING_MODEL } from "../config/models.js";
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -53,7 +52,7 @@ const log = logger.child({ module: "scheduler" });
  * Start the nightly consolidation scheduler using pg-boss.
  */
 export async function startScheduler(
-  client: Anthropic,
+  client: OpenAI,
   pool: pg.Pool,
   config: SchedulerConfig = {},
 ): Promise<SchedulerHandle> {
@@ -122,7 +121,7 @@ export async function startScheduler(
   await boss.work("usme-reflection-morning", { localConcurrency: 1 }, async () => {
     log.info({ phase: "scheduled_reflection_start", queue: "usme-reflection-morning", pacificHour: 8 }, "Starting scheduled reflection (08:00 Pacific)");
     try {
-      const result = await runReflection({ triggerSource: "scheduler-morning", model: DEFAULT_REASONING_MODEL });
+      const result = await runReflection({ triggerSource: "scheduler-morning" });
       if (result.candidatesCreated > 0) {
         log.info({ phase: "scheduled_reflection_candidates", candidatesCreated: result.candidatesCreated }, "reflection produced candidates - delivering now");
         await deliverSkillCandidates(pool, config.sendFn);
@@ -137,7 +136,7 @@ export async function startScheduler(
   await boss.work("usme-reflection-evening", { localConcurrency: 1 }, async () => {
     log.info({ phase: "scheduled_reflection_start", queue: "usme-reflection-evening", pacificHour: 20 }, "Starting scheduled reflection (20:00 Pacific)");
     try {
-      const result = await runReflection({ triggerSource: "scheduler-evening", model: DEFAULT_REASONING_MODEL });
+      const result = await runReflection({ triggerSource: "scheduler-evening" });
       if (result.candidatesCreated > 0) {
         log.info({ phase: "scheduled_reflection_candidates", candidatesCreated: result.candidatesCreated }, "reflection produced candidates - scheduling morning delivery via flag");
       }

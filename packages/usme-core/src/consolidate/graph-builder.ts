@@ -2,16 +2,17 @@
  * Graph Builder — batch entity relationship inference.
  *
  * Fetches all entities ordered by relationship count (orphans first),
- * batches them, and asks Claude to infer relationships from recent evidence.
+ * batches them, and asks the model to infer relationships from recent evidence.
  */
 
-import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 import { Pool } from "pg";
 import { logger } from "../logger.js";
 import { GRAPH_BUILDER_CONFIG } from "./reflect-config.js";
 import { DEFAULT_REASONING_MODEL } from "../config/models.js";
 import { makeSlug, assignSlug } from "./reflect-corpus.js";
 import { buildGraphBuilderPrompt } from "./reflect-prompts.js";
+import { callOpenAITool } from "../llm/openai-tool.js";
 
 const log = logger.child({ module: "graph-builder" });
 
@@ -54,11 +55,11 @@ export async function runGraphBuilder(opts: GraphBuilderOptions): Promise<GraphB
   const databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl) throw new Error("DATABASE_URL not set — cannot run graph builder");
 
-  const anthropicKey = process.env.ANTHROPIC_API_KEY ?? "";
-  if (!anthropicKey) throw new Error("ANTHROPIC_API_KEY not set — cannot run graph builder");
+  const openaiKey = process.env.OPENAI_API_KEY ?? "";
+  if (!openaiKey) throw new Error("OPENAI_API_KEY not set — cannot run graph builder");
 
   const pool = new Pool({ connectionString: databaseUrl });
-  const client = new Anthropic({ apiKey: anthropicKey });
+  const client = new OpenAI({ apiKey: openaiKey });
 
   log.info({ triggerSource: opts.triggerSource, model, dryRun: opts.dryRun }, "graph builder starting");
 
@@ -129,13 +130,14 @@ export async function runGraphBuilder(opts: GraphBuilderOptions): Promise<GraphB
         GRAPH_BUILDER_CONFIG,
       );
 
-      // Call Claude
+      // Call LLM
       let proposed: ProposedRelationship[] = [];
       try {
-        const response = await client.messages.create({
+        const { output } = await callOpenAITool({
+          client,
           model,
-          max_tokens: 4096,
-          tools: [{
+          maxTokens: 4096,
+          tool: {
             name: "graph_output",
             description: "Output relationship graph for the entity batch",
             input_schema: {
@@ -160,18 +162,12 @@ export async function runGraphBuilder(opts: GraphBuilderOptions): Promise<GraphB
               },
               required: ["relationships"],
             },
-          }],
-          tool_choice: { type: "tool", name: "graph_output" },
-          messages: [{ role: "user", content: prompt }],
+          },
+          prompt,
         });
 
-        const block = response.content.find(
-          (b): b is Anthropic.ToolUseBlock => b.type === "tool_use" && b.name === "graph_output",
-        );
-        if (block) {
-          const input = block.input as { relationships: ProposedRelationship[] };
-          proposed = Array.isArray(input.relationships) ? input.relationships : [];
-        }
+        const input = output as { relationships: ProposedRelationship[] };
+        proposed = Array.isArray(input.relationships) ? input.relationships : [];
       } catch (err) {
         log.error({ err, batchIdx }, "graph builder LLM call failed — skipping batch");
         continue;

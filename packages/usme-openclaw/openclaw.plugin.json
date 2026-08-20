@@ -3,6 +3,9 @@
   "name": "USME Context Engine",
   "description": "Utility-Shaped Memory Ecology — relevance-based context assembly with active, log-only, and off modes",
   "version": "0.1.0",
+  "activation": {
+    "onStartup": true
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

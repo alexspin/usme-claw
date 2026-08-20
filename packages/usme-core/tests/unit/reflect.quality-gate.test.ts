@@ -6,15 +6,21 @@
  * Grades B and below → no skill_candidates INSERT.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-// ── Mock @anthropic-ai/sdk ────────────────────────────────────────────────────
+// ── Mock LLM SDKs ─────────────────────────────────────────────────────────────
 
 const mockMessagesCreate = vi.fn();
 
+vi.mock("openai", () => ({
+  default: vi.fn().mockImplementation(() => ({
+    chat: { completions: { create: mockMessagesCreate } },
+  })),
+}));
+
 vi.mock("@anthropic-ai/sdk", () => ({
   default: vi.fn().mockImplementation(() => ({
-    messages: { create: mockMessagesCreate },
+    messages: { create: vi.fn() },
   })),
 }));
 
@@ -40,21 +46,25 @@ vi.mock("../../src/db/pool.js", () => ({
 
 function makeReflectionResponse(grade: string, skills: { name: string; description: string; confidence: number }[]): unknown {
   return {
-    content: [
-      {
-        type: "tool_use",
-        name: "reflection_output",
-        input: {
-          concept_updates: [],
-          new_skills: skills,
-          contradictions: [],
-          entity_updates: [],
-          // overall_assessment starts with the grade letter
-          overall_assessment: `${grade} — memory health assessment for testing`,
-        },
+    choices: [{
+      message: {
+        tool_calls: [{
+          type: "function",
+          function: {
+            name: "reflection_output",
+            arguments: JSON.stringify({
+              concept_updates: [],
+              new_skills: skills,
+              contradictions: [],
+              entity_updates: [],
+              // overall_assessment starts with the grade letter
+              overall_assessment: `${grade} — memory health assessment for testing`,
+            }),
+          },
+        }],
       },
-    ],
-    usage: { input_tokens: 100, output_tokens: 50 },
+    }],
+    usage: { prompt_tokens: 100, completion_tokens: 50 },
   };
 }
 
@@ -82,11 +92,19 @@ function setupTransactionMocks() {
 describe("runReflection — quality gate", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    process.env.ANTHROPIC_API_KEY = "test-key";
+    delete process.env.USME_REFLECTION_PROVIDER;
+    delete process.env.ANTHROPIC_API_KEY;
+    process.env.OPENAI_API_KEY = "test-key";
 
     mockClient.query.mockReset();
     mockRelease.mockReset();
     mockConnect.mockResolvedValue(mockClient);
+  });
+
+  afterEach(() => {
+    delete process.env.USME_REFLECTION_PROVIDER;
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
   });
 
   it("grade 'B' → skill_candidates INSERT not called", async () => {

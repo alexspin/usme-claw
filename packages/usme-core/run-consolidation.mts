@@ -1,6 +1,7 @@
-import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 import pg from "pg";
 import { runNightlyConsolidation } from "./src/consolidate/nightly.js";
+import { DEFAULT_REASONING_MODEL } from "./src/config/models.js";
 
 async function main() {
   const pool = new pg.Pool({
@@ -8,10 +9,11 @@ async function main() {
     user: "usme", password: "usme_dev", max: 5,
   });
 
-  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   const config = {
-    sonnetModel: "claude-sonnet-4-6",
-    opusModel: "claude-sonnet-4-6",
+    sonnetModel: DEFAULT_REASONING_MODEL,
+    opusModel: DEFAULT_REASONING_MODEL,
+    reconciliationModel: DEFAULT_REASONING_MODEL,
     embeddingApiKey: process.env.OPENAI_API_KEY,
   };
 

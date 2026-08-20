@@ -1,11 +1,12 @@
-import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 import { z } from "zod";
-import { destr } from "destr";
 import type pg from "pg";
 import { FACT_EXTRACTION_V1 } from "./prompts/fact-extraction-v1.js";
 import { insertSensoryTrace, findSimilarTrace, findSimilarTraces } from "../db/queries.js";
 import { embedBatch } from "../embed/index.js";
 import { logger } from "../logger.js";
+import { callOpenAITool } from "../llm/openai-tool.js";
+import { DEFAULT_FAST_MODEL } from "../config/models.js";
 
 export const DEDUP_SIMILARITY_THRESHOLD = 0.95;
 
@@ -64,51 +65,51 @@ function computeExpiresAt(ttlHours: number | null): Date | null {
 }
 
 export async function extractFacts(
-  client: Anthropic,
+  client: OpenAI,
   ctx: ExtractionContext,
   config?: ExtractorConfig,
 ): Promise<FactExtractionResult> {
   const prompt = buildPrompt(ctx.serializedTurn);
 
-  const response = await client.messages.create({
-    model: config?.model ?? "claude-haiku-4-5",
-    max_tokens: config?.maxTokens ?? 2048,
-    tools: [{
-      name: "extract_facts",
-      description: "Extract factual items from the conversation turn",
-      input_schema: {
-        type: "object" as const,
-        properties: {
-          items: {
-            type: "array",
+  let output: unknown;
+  try {
+    ({ output } = await callOpenAITool({
+      client,
+      model: config?.model ?? DEFAULT_FAST_MODEL,
+      maxTokens: config?.maxTokens ?? 2048,
+      tool: {
+        name: "extract_facts",
+        description: "Extract factual items from the conversation turn",
+        input_schema: {
+          type: "object" as const,
+          properties: {
             items: {
-              type: "object",
-              properties: {
-                content: { type: "string" },
-                fact_type: { type: "string" },
-                utility: { type: "string", enum: ["high", "medium", "low", "discard"] },
-                confidence: { type: "number" },
-                provenance_kind: { type: "string" },
-                tags: { type: "array", items: { type: "string" } },
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  content: { type: "string" },
+                  fact_type: { type: "string" },
+                  utility: { type: "string", enum: ["high", "medium", "low", "discard"] },
+                  confidence: { type: "number" },
+                  provenance_kind: { type: "string" },
+                  tags: { type: "array", items: { type: "string" } },
+                },
+                required: ["content", "fact_type", "utility", "confidence"],
               },
-              required: ["content", "fact_type", "utility", "confidence"],
             },
           },
+          required: ["items"],
         },
-        required: ["items"],
       },
-    }],
-    tool_choice: { type: "tool", name: "extract_facts" },
-    messages: [{ role: "user", content: prompt }],
-  });
-
-  const toolBlock = response.content.find((b) => b.type === "tool_use");
-  if (!toolBlock || toolBlock.type !== "tool_use") {
-    log.warn("no tool_use block in extraction response");
+      prompt,
+    }));
+  } catch (err) {
+    log.warn({ err }, "no usable tool call in extraction response");
     return { items: [] };
   }
 
-  const parsed = FactExtractionResultSchema.safeParse(destr(toolBlock.input));
+  const parsed = FactExtractionResultSchema.safeParse(output);
   if (!parsed.success) {
     log.error({ error: parsed.error }, "extraction schema validation failed");
     return { items: [] };
@@ -195,7 +196,7 @@ export async function persistExtractedItems(
 // ── Fire-and-Forget Entry Point ────────────────────────────
 
 export async function runFactExtraction(
-  client: Anthropic,
+  client: OpenAI,
   pool: pg.Pool,
   ctx: ExtractionContext,
   config?: ExtractorConfig & { embeddingApiKey?: string },

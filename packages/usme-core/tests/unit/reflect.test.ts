@@ -8,17 +8,43 @@
  *   - --dry-run returns results without making any DB writes
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from "vitest";
+import { DEFAULT_REASONING_MODEL } from "../../src/config/models.js";
 
-// ── Mock @anthropic-ai/sdk ────────────────────────────────────────────────────
+const originalOpenAIReflectionModel = process.env.USME_OPENAI_REFLECTION_MODEL;
+delete process.env.USME_OPENAI_REFLECTION_MODEL;
+
+// ── Mock LLM SDKs ─────────────────────────────────────────────────────────────
 
 const mockMessagesCreate = vi.fn();
+const mockAnthropicMessagesCreate = vi.fn();
+
+vi.mock("openai", () => ({
+  default: vi.fn().mockImplementation(() => ({
+    chat: { completions: { create: mockMessagesCreate } },
+  })),
+}));
 
 vi.mock("@anthropic-ai/sdk", () => ({
   default: vi.fn().mockImplementation(() => ({
-    messages: { create: mockMessagesCreate },
+    messages: { create: mockAnthropicMessagesCreate },
   })),
 }));
+
+afterEach(() => {
+  delete process.env.USME_REFLECTION_PROVIDER;
+  delete process.env.USME_OPENAI_REFLECTION_MODEL;
+  delete process.env.OPENAI_API_KEY;
+  delete process.env.ANTHROPIC_API_KEY;
+});
+
+afterAll(() => {
+  if (originalOpenAIReflectionModel === undefined) {
+    delete process.env.USME_OPENAI_REFLECTION_MODEL;
+  } else {
+    process.env.USME_OPENAI_REFLECTION_MODEL = originalOpenAIReflectionModel;
+  }
+});
 
 // ── Mock DB pool ──────────────────────────────────────────────────────────────
 
@@ -44,21 +70,36 @@ function makeReflectionResponse(
   skills: { name: string; description: string; confidence: number }[],
   grade = "A-",
 ): unknown {
+  return makeOpenAIResponse({
+    concept_updates: [],
+    new_skills: skills,
+    contradictions: [],
+    entity_updates: [],
+    // overall_assessment must start with a passing grade for candidates to be written
+    overall_assessment: `${grade}: Memory health looks good.`,
+  });
+}
+
+function makeOpenAIResponse(input: Record<string, unknown>): unknown {
   return {
-    content: [
-      {
-        type: "tool_use",
-        name: "reflection_output",
-        input: {
-          concept_updates: [],
-          new_skills: skills,
-          contradictions: [],
-          entity_updates: [],
-          // overall_assessment must start with a passing grade for candidates to be written
-          overall_assessment: `${grade}: Memory health looks good.`,
-        },
+    choices: [{
+      message: {
+        tool_calls: [{
+          type: "function",
+          function: {
+            name: "reflection_output",
+            arguments: JSON.stringify(input),
+          },
+        }],
       },
-    ],
+    }],
+    usage: { prompt_tokens: 100, completion_tokens: 100 },
+  };
+}
+
+function makeAnthropicResponse(input: Record<string, unknown>): unknown {
+  return {
+    content: [{ type: "tool_use", name: "reflection_output", input }],
     usage: { input_tokens: 100, output_tokens: 100 },
   };
 }
@@ -80,7 +121,9 @@ function makeEmptyCorpusQueries() {
 describe("runReflection — skill confidence routing", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    process.env.ANTHROPIC_API_KEY = "test-key";
+    delete process.env.USME_REFLECTION_PROVIDER;
+    delete process.env.ANTHROPIC_API_KEY;
+    process.env.OPENAI_API_KEY = "test-key";
 
     // Reset mockClient.query tracking
     mockClient.query.mockReset();
@@ -185,24 +228,15 @@ describe("runReflection — skill confidence routing", () => {
       .mockResolvedValueOnce({ rows: [] }) // pending skill_candidates
     .mockResolvedValueOnce({ rows: [] }); // active constraints (fetchActiveConstraints)
 
-    mockMessagesCreate.mockResolvedValue({
-      content: [
-        {
-          type: "tool_use",
-          name: "reflection_output",
-          input: {
-            concept_updates: [],
-            new_skills: [],
-            contradictions: [
-              { winner_concept_id: invalidWinnerId, loser_concept_id: validConceptId, reason: "bad uuid from model" },
-            ],
-            entity_updates: [],
-            overall_assessment: "A-: fine.",
-          },
-        },
+    mockMessagesCreate.mockResolvedValue(makeOpenAIResponse({
+      concept_updates: [],
+      new_skills: [],
+      contradictions: [
+        { winner_concept_id: invalidWinnerId, loser_concept_id: validConceptId, reason: "bad uuid from model" },
       ],
-      usage: { input_tokens: 100, output_tokens: 100 },
-    });
+      entity_updates: [],
+      overall_assessment: "A-: fine.",
+    }));
 
     const { runReflection } = await import("../../src/consolidate/reflect.js");
 
@@ -217,13 +251,70 @@ describe("runReflection — skill confidence routing", () => {
     expect(updateCall).toBeUndefined();
   });
 
-  it("throws when ANTHROPIC_API_KEY is not set", async () => {
+  it("throws when OPENAI_API_KEY is not set by default", async () => {
+    delete process.env.OPENAI_API_KEY;
+    makeEmptyCorpusQueries();
+
+    const { runReflection } = await import("../../src/consolidate/reflect.js");
+
+    await expect(runReflection({ triggerSource: "test" })).rejects.toThrow("OPENAI_API_KEY not set — cannot run reflection with OpenAI");
+  });
+
+  it("uses OpenAI by default and does not instantiate Anthropic", async () => {
+    delete process.env.USME_REASONING_MODEL;
+    makeEmptyCorpusQueries();
+    mockMessagesCreate.mockResolvedValue(makeReflectionResponse([], "A"));
+
+    const Anthropic = (await import("@anthropic-ai/sdk")).default;
+    const { runReflection } = await import("../../src/consolidate/reflect.js");
+
+    await runReflection({ triggerSource: "test", dryRun: true });
+
+    expect(mockMessagesCreate).toHaveBeenCalled();
+    expect(mockMessagesCreate.mock.calls[0]?.[0].model).toBe(DEFAULT_REASONING_MODEL);
+    expect(Anthropic).not.toHaveBeenCalled();
+  });
+
+  it("normalizes openai/ model prefix before calling OpenAI", async () => {
+    makeEmptyCorpusQueries();
+    mockMessagesCreate.mockResolvedValue(makeReflectionResponse([], "A"));
+
+    const { runReflection } = await import("../../src/consolidate/reflect.js");
+
+    await runReflection({ triggerSource: "test", dryRun: true, model: "openai/gpt-5.5" });
+
+    expect(mockMessagesCreate.mock.calls[0]?.[0].model).toBe("gpt-5.5");
+  });
+
+  it("throws Anthropic-specific missing-key error when provider is anthropic", async () => {
+    process.env.USME_REFLECTION_PROVIDER = "anthropic";
     delete process.env.ANTHROPIC_API_KEY;
     makeEmptyCorpusQueries();
 
     const { runReflection } = await import("../../src/consolidate/reflect.js");
 
-    await expect(runReflection({ triggerSource: "test" })).rejects.toThrow("ANTHROPIC_API_KEY not set");
+    await expect(runReflection({ triggerSource: "test" })).rejects.toThrow("ANTHROPIC_API_KEY not set — cannot run reflection with Anthropic");
+  });
+
+  it("uses Anthropic only when explicitly configured", async () => {
+    process.env.USME_REFLECTION_PROVIDER = "anthropic";
+    process.env.ANTHROPIC_API_KEY = "anthropic-key";
+    makeEmptyCorpusQueries();
+    mockAnthropicMessagesCreate.mockResolvedValue(makeAnthropicResponse({
+      concept_updates: [],
+      new_skills: [],
+      contradictions: [],
+      entity_updates: [],
+      overall_assessment: "A: healthy.",
+    }));
+
+    const { runReflection } = await import("../../src/consolidate/reflect.js");
+
+    const result = await runReflection({ triggerSource: "test", dryRun: true });
+
+    expect(result.runId).toBe(-1);
+    expect(mockAnthropicMessagesCreate).toHaveBeenCalled();
+    expect(mockAnthropicMessagesCreate.mock.calls[0]?.[0].model).toBe("claude-sonnet-4-6");
   });
 });
 
@@ -236,7 +327,9 @@ describe("runReflection — concept/entity slug remapping", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    process.env.ANTHROPIC_API_KEY = "test-key";
+    delete process.env.USME_REFLECTION_PROVIDER;
+    delete process.env.ANTHROPIC_API_KEY;
+    process.env.OPENAI_API_KEY = "test-key";
     mockClient.query.mockReset();
     mockRelease.mockReset();
     mockConnect.mockResolvedValue(mockClient);
@@ -269,20 +362,13 @@ describe("runReflection — concept/entity slug remapping", () => {
   it("remaps concept slug to UUID in concept_updates before DB write", async () => {
     makeCorpusWithConceptAndEntity();
 
-    mockMessagesCreate.mockResolvedValue({
-      content: [{
-        type: "tool_use",
-        name: "reflection_output",
-        input: {
-          concept_updates: [{ concept_id: "use-lru-cache-library", action: "raise", reason: "frequently used" }],
-          new_skills: [],
-          contradictions: [],
-          entity_updates: [],
-          overall_assessment: "A: healthy.",
-        },
-      }],
-      usage: { input_tokens: 100, output_tokens: 50 },
-    });
+    mockMessagesCreate.mockResolvedValue(makeOpenAIResponse({
+      concept_updates: [{ concept_id: "use-lru-cache-library", action: "raise", reason: "frequently used" }],
+      new_skills: [],
+      contradictions: [],
+      entity_updates: [],
+      overall_assessment: "A: healthy.",
+    }));
 
     const { runReflection } = await import("../../src/consolidate/reflect.js");
     const result = await runReflection({ triggerSource: "test", dryRun: false });
@@ -300,24 +386,17 @@ describe("runReflection — concept/entity slug remapping", () => {
   it("remaps concept slugs to UUIDs in contradictions before UUID-set validation", async () => {
     makeCorpusWithConceptAndEntity();
 
-    mockMessagesCreate.mockResolvedValue({
-      content: [{
-        type: "tool_use",
-        name: "reflection_output",
-        input: {
-          concept_updates: [],
-          new_skills: [],
-          contradictions: [{
-            winner_concept_id: "batch-db-writes-always",
-            loser_concept_id: "use-lru-cache-library",
-            reason: "conflicting caching strategies",
-          }],
-          entity_updates: [],
-          overall_assessment: "B: one contradiction.",
-        },
+    mockMessagesCreate.mockResolvedValue(makeOpenAIResponse({
+      concept_updates: [],
+      new_skills: [],
+      contradictions: [{
+        winner_concept_id: "batch-db-writes-always",
+        loser_concept_id: "use-lru-cache-library",
+        reason: "conflicting caching strategies",
       }],
-      usage: { input_tokens: 100, output_tokens: 50 },
-    });
+      entity_updates: [],
+      overall_assessment: "B: one contradiction.",
+    }));
 
     const { runReflection } = await import("../../src/consolidate/reflect.js");
     const result = await runReflection({ triggerSource: "test", dryRun: false });
@@ -337,24 +416,17 @@ describe("runReflection — concept/entity slug remapping", () => {
   it("remaps entity slug to UUID in entity_updates before DB write", async () => {
     makeCorpusWithConceptAndEntity();
 
-    mockMessagesCreate.mockResolvedValue({
-      content: [{
-        type: "tool_use",
-        name: "reflection_output",
-        input: {
-          concept_updates: [],
-          new_skills: [],
-          contradictions: [],
-          entity_updates: [{
-            entity_id: "alex",
-            action: "add_relationship",
-            details: { target_entity_id: ENTITY_UUID, relationship: "MAINTAINS", confidence: 0.9 },
-          }],
-          overall_assessment: "A-: good.",
-        },
+    mockMessagesCreate.mockResolvedValue(makeOpenAIResponse({
+      concept_updates: [],
+      new_skills: [],
+      contradictions: [],
+      entity_updates: [{
+        entity_id: "alex",
+        action: "add_relationship",
+        details: { target_entity_id: ENTITY_UUID, relationship: "MAINTAINS", confidence: 0.9 },
       }],
-      usage: { input_tokens: 100, output_tokens: 50 },
-    });
+      overall_assessment: "A-: good.",
+    }));
 
     const { runReflection } = await import("../../src/consolidate/reflect.js");
     const result = await runReflection({ triggerSource: "test", dryRun: false });
@@ -372,24 +444,17 @@ describe("runReflection — concept/entity slug remapping", () => {
   it("skips contradiction when LLM returns hallucinated concept slug", async () => {
     makeCorpusWithConceptAndEntity();
 
-    mockMessagesCreate.mockResolvedValue({
-      content: [{
-        type: "tool_use",
-        name: "reflection_output",
-        input: {
-          concept_updates: [],
-          new_skills: [],
-          contradictions: [{
-            winner_concept_id: "hallucinated-concept-slug-xyz",
-            loser_concept_id: "use-lru-cache-library",
-            reason: "hallucinated winner",
-          }],
-          entity_updates: [],
-          overall_assessment: "B: one contradiction.",
-        },
+    mockMessagesCreate.mockResolvedValue(makeOpenAIResponse({
+      concept_updates: [],
+      new_skills: [],
+      contradictions: [{
+        winner_concept_id: "hallucinated-concept-slug-xyz",
+        loser_concept_id: "use-lru-cache-library",
+        reason: "hallucinated winner",
       }],
-      usage: { input_tokens: 100, output_tokens: 50 },
-    });
+      entity_updates: [],
+      overall_assessment: "B: one contradiction.",
+    }));
 
     const { runReflection } = await import("../../src/consolidate/reflect.js");
     const result = await runReflection({ triggerSource: "test", dryRun: false });

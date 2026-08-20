@@ -12,11 +12,11 @@
 
 /** Primary reasoning model — used for episodification, skill drafting, reconciliation, reflection. */
 export const DEFAULT_REASONING_MODEL =
-  process.env.USME_REASONING_MODEL ?? "claude-sonnet-4-6";
+  process.env.USME_REASONING_MODEL ?? "gpt-5.5";
 
 /** Fast/cheap model — used for entity extraction, importance scoring. */
 export const DEFAULT_FAST_MODEL =
-  process.env.USME_FAST_MODEL ?? "claude-haiku-4-5";
+  process.env.USME_FAST_MODEL ?? "gpt-5.4-mini";
 
 /** OpenAI embedding model — must match EMBEDDING_DIMENSIONS. */
 export const DEFAULT_EMBEDDING_MODEL =

@@ -19,7 +19,7 @@
  * Format: one JSON object per line (JSON lines), human-readable.
  */
 
-import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 import {
   getPool,
   closePool,
@@ -35,7 +35,7 @@ import {
   logger,
 } from "@usme/core";
 import type { SchedulerHandle, InjectedMemory } from "@usme/core";
-import { resolveConfig } from "./config.js";
+import { resolveConfig, type UsmePluginConfigInput } from "./config.js";
 import { spreadingActivation } from "./spread.js";
 import { reflectCommand } from "./commands/reflect.js";
 import { errMeta, keyMeta, safePreview } from "./safe-log.js";
@@ -120,7 +120,8 @@ export default function usmePlugin(api: {
     ) => Promise<Record<string, unknown> | void> | Record<string, unknown> | void,
     opts?: { priority?: number },
   ) => void;
-  config: any;
+  pluginConfig?: UsmePluginConfigInput;
+  config?: any;
   logger: {
     info: (msg: string) => void;
     warn: (msg: string) => void;
@@ -139,9 +140,9 @@ export default function usmePlugin(api: {
     handler: (ctx: { commandBody?: string }) => Promise<{ text: string }> | { text: string };
   }) => void;
 }) {
-  const config = resolveConfig(
-    api.config?.plugins?.entries?.["usme-claw"]?.config,
-  );
+  const pluginConfig =
+    api.pluginConfig ?? api.config?.plugins?.entries?.["usme-claw"]?.config;
+  const config = resolveConfig(pluginConfig);
 
   // Treat legacy "disabled" value as "off" for backwards compatibility
   const effectiveMode = (config.mode as string) === "disabled" ? "off" : config.mode;
@@ -186,25 +187,26 @@ export default function usmePlugin(api: {
     idleTimeoutMillis: config.db.idleTimeoutMs,
   });
 
-  const anthropicKey = process.env.ANTHROPIC_API_KEY ?? "";
   const openaiKey = process.env.OPENAI_API_KEY ?? "";
 
-  if (anthropicKey) {
+  if (openaiKey) {
     if (!_schedulerHandle) {
-      const anthropicClient = new Anthropic({ apiKey: anthropicKey });
+      const openaiClient = new OpenAI({ apiKey: openaiKey });
       log.info({
         phase: "scheduler_start_enqueue",
         sonnetModel: config.consolidation.sonnetModel,
         skillDraftingModel: config.consolidation.skillDraftingModel,
+        reconciliationModel: config.consolidation.reconciliationModel,
         cronExpression: config.consolidation.cron,
         miniConsolidationIntervalMs: 30 * 60_000,
-        anthropicApiKey: keyMeta(anthropicKey),
+        openaiApiKey: keyMeta(openaiKey),
         embeddingApiKey: keyMeta(openaiKey),
       }, "[usme] scheduler start requested");
       void (async () => {
-        _schedulerHandle = await startScheduler(anthropicClient, pool, {
+        _schedulerHandle = await startScheduler(openaiClient, pool, {
           sonnetModel: config.consolidation.sonnetModel,
           opusModel: config.consolidation.skillDraftingModel,
+          reconciliationModel: config.consolidation.reconciliationModel,
           embeddingApiKey: openaiKey,
           cronExpression: config.consolidation.cron,
           miniConsolidationIntervalMs: 30 * 60_000,
@@ -238,8 +240,8 @@ export default function usmePlugin(api: {
       log.info({ phase: "scheduler_start_skip", reason: "already_started" }, "[usme] scheduler already running");
     }
   } else {
-    log.warn({ phase: "scheduler_start_skip", reason: "missing_anthropic_api_key", anthropicApiKey: keyMeta(anthropicKey) }, "[usme] scheduler disabled");
-    api.logger.warn("[usme] no ANTHROPIC_API_KEY — consolidation scheduler disabled");
+    log.warn({ phase: "scheduler_start_skip", reason: "missing_openai_api_key", openaiApiKey: keyMeta(openaiKey) }, "[usme] scheduler disabled");
+    api.logger.warn("[usme] no OPENAI_API_KEY — consolidation scheduler disabled");
   }
 
   const isActive = effectiveMode === "active";
@@ -413,8 +415,8 @@ export default function usmePlugin(api: {
       // ── Fire-and-forget extraction (fact + entity) ────────────────────────
       // Runs after retrieval so it never blocks injection. Uses the same
       // agentMessages already normalized above.
-      log.info({ phase: "extraction_check", sessionId, extractionEnabled: config.extraction?.enabled, anthropicApiKey: keyMeta(anthropicKey) }, "[usme] extraction check");
-      if (config.extraction?.enabled && anthropicKey) {
+      log.info({ phase: "extraction_check", sessionId, extractionEnabled: config.extraction?.enabled, openaiApiKey: keyMeta(openaiKey) }, "[usme] extraction check");
+      if (config.extraction?.enabled && openaiKey) {
         const serializedTurn = agentMessages
           .filter((m) => m.role === "user" || m.role === "assistant")
           .map((m) => {
@@ -430,14 +432,14 @@ export default function usmePlugin(api: {
           log.info({ phase: "extraction_skip", sessionId, reason: "heartbeat_pattern" }, "[usme] extraction skipped");
           // fall through to injection return below
         } else if (serializedTurn) {
-          const anthropicClient = new Anthropic({ apiKey: anthropicKey });
+          const openaiClient = new OpenAI({ apiKey: openaiKey });
           const queue = getExtractionQueue();
           log.info({ phase: "fact_extraction_enqueue", sessionId, model: config.extraction.model, serializedTurnLength: serializedTurn.length }, "[usme] enqueueing fact extraction");
           void queue.enqueue(async () => {
             log.info({ phase: "fact_extraction_start", sessionId }, "[usme] runFactExtraction start");
             try {
               await runFactExtraction(
-                anthropicClient, pool,
+                openaiClient, pool,
                 { sessionId, turnIndex: agentMessages.filter((m) => m.role === "user").length, serializedTurn },
                 { model: config.extraction.model, embeddingApiKey: config.embeddingApiKey || openaiKey },
               );
@@ -454,7 +456,7 @@ export default function usmePlugin(api: {
               log.info({ phase: "entity_extraction_start", sessionId }, "[usme] runEntityExtraction start");
               try {
                 await runEntityExtraction(
-                  anthropicClient, pool,
+                  openaiClient, pool,
                   serializedTurn,
                   { model: config.extraction.entityExtraction.model, embeddingApiKey: config.embeddingApiKey || openaiKey },
                 );
@@ -473,7 +475,7 @@ export default function usmePlugin(api: {
         log.info({
           phase: "extraction_skip",
           sessionId,
-          reason: config.extraction?.enabled ? "missing_anthropic_api_key" : "disabled",
+          reason: config.extraction?.enabled ? "missing_openai_api_key" : "disabled",
         }, "[usme] extraction skipped");
       }
 

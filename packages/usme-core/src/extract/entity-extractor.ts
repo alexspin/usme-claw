@@ -1,6 +1,5 @@
-import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 import type pg from "pg";
-import { destr } from "destr";
 import { z } from "zod";
 import { ENTITY_EXTRACTION_V1 } from "./prompts/entity-extraction-v1.js";
 import { logger } from "../logger.js";
@@ -10,6 +9,8 @@ import {
   searchByEmbedding,
 } from "../db/queries.js";
 import { embedBatch } from "../embed/index.js";
+import { callOpenAITool, type ToolSpec } from "../llm/openai-tool.js";
+import { DEFAULT_FAST_MODEL } from "../config/models.js";
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -73,9 +74,9 @@ const EntityExtractionResultSchema = z.object({
   relationships: z.array(ExtractedRelationshipSchema),
 });
 
-// ── Tool Schema for Anthropic tool_use ─────────────────────
+// ── Tool Schema ──────────────────────────────────────────────
 
-const EXTRACT_ENTITIES_TOOL: Anthropic.Tool = {
+const EXTRACT_ENTITIES_TOOL: ToolSpec = {
   name: "extract_entities",
   description: "Extract named entities and relationships from the conversation turn.",
   input_schema: {
@@ -126,26 +127,21 @@ function buildPrompt(serializedTurn: string): string {
 }
 
 export async function extractEntities(
-  client: Anthropic,
+  client: OpenAI,
   serializedTurn: string,
   config?: EntityExtractorConfig,
 ): Promise<EntityExtractionResult> {
   const prompt = buildPrompt(serializedTurn);
 
-  const response = await client.messages.create({
-    model: config?.model ?? "claude-haiku-4-5",
-    max_tokens: config?.maxTokens ?? 2048,
-    tools: [EXTRACT_ENTITIES_TOOL],
-    tool_choice: { type: "tool", name: "extract_entities" },
-    messages: [{ role: "user", content: prompt }],
+  const { output } = await callOpenAITool({
+    client,
+    model: config?.model ?? DEFAULT_FAST_MODEL,
+    maxTokens: config?.maxTokens ?? 2048,
+    tool: EXTRACT_ENTITIES_TOOL,
+    prompt,
   });
 
-  const toolBlock = response.content.find((b) => b.type === "tool_use");
-  if (!toolBlock || toolBlock.type !== "tool_use") {
-    throw new Error("Entity extraction: no tool_use block in response");
-  }
-
-  const parsed = EntityExtractionResultSchema.safeParse(destr(JSON.stringify(toolBlock.input)));
+  const parsed = EntityExtractionResultSchema.safeParse(output);
   if (!parsed.success) {
     throw new Error(`Entity extraction schema validation failed: ${parsed.error.message}`);
   }
@@ -279,7 +275,7 @@ export async function persistEntities(
 // ── Fire-and-Forget Entry Point ────────────────────────────
 
 export async function runEntityExtraction(
-  client: Anthropic,
+  client: OpenAI,
   pool: pg.Pool,
   serializedTurn: string,
   config?: EntityExtractorConfig,

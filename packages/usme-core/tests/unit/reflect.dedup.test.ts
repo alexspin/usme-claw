@@ -9,15 +9,21 @@
  *   - dry-run: dismissals not written even when LLM proposes them
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-// ── Mock @anthropic-ai/sdk ────────────────────────────────────────────────────
+// ── Mock LLM SDKs ─────────────────────────────────────────────────────────────
 
 const mockMessagesCreate = vi.fn();
 
+vi.mock("openai", () => ({
+  default: vi.fn().mockImplementation(() => ({
+    chat: { completions: { create: mockMessagesCreate } },
+  })),
+}));
+
 vi.mock("@anthropic-ai/sdk", () => ({
   default: vi.fn().mockImplementation(() => ({
-    messages: { create: mockMessagesCreate },
+    messages: { create: vi.fn() },
   })),
 }));
 
@@ -55,22 +61,30 @@ function makeReflectionResponse(opts: {
     newSkills = [],
     candidateDismissals = [],
   } = opts;
+  return makeOpenAIResponse({
+    concept_updates: [],
+    new_skills: newSkills,
+    contradictions: [],
+    entity_updates: [],
+    overall_assessment: `${grade}: Memory health looks good for test.`,
+    candidate_dismissals: candidateDismissals,
+  });
+}
+
+function makeOpenAIResponse(input: Record<string, unknown>): unknown {
   return {
-    content: [
-      {
-        type: "tool_use",
-        name: "reflection_output",
-        input: {
-          concept_updates: [],
-          new_skills: newSkills,
-          contradictions: [],
-          entity_updates: [],
-          overall_assessment: `${grade}: Memory health looks good for test.`,
-          candidate_dismissals: candidateDismissals,
-        },
+    choices: [{
+      message: {
+        tool_calls: [{
+          type: "function",
+          function: {
+            name: "reflection_output",
+            arguments: JSON.stringify(input),
+          },
+        }],
       },
-    ],
-    usage: { input_tokens: 100, output_tokens: 100 },
+    }],
+    usage: { prompt_tokens: 100, completion_tokens: 100 },
   };
 }
 
@@ -107,11 +121,19 @@ function setupDefaultTransaction() {
 describe("runReflection — dedup / candidate_dismissals / trgm guard", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    process.env.ANTHROPIC_API_KEY = "test-key";
+    delete process.env.USME_REFLECTION_PROVIDER;
+    delete process.env.ANTHROPIC_API_KEY;
+    process.env.OPENAI_API_KEY = "test-key";
 
     mockClient.query.mockReset();
     mockRelease.mockReset();
     mockConnect.mockResolvedValue(mockClient);
+  });
+
+  afterEach(() => {
+    delete process.env.USME_REFLECTION_PROVIDER;
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
   });
 
   // ── Test 1 ────────────────────────────────────────────────────────────────
@@ -234,23 +256,14 @@ describe("runReflection — dedup / candidate_dismissals / trgm guard", () => {
     setupDefaultTransaction();
 
     // Return a response without candidate_dismissals field at all
-    mockMessagesCreate.mockResolvedValue({
-      content: [
-        {
-          type: "tool_use",
-          name: "reflection_output",
-          input: {
-            concept_updates: [],
-            new_skills: [],
-            contradictions: [],
-            entity_updates: [],
-            overall_assessment: "B+: all good",
-            // candidate_dismissals intentionally omitted
-          },
-        },
-      ],
-      usage: { input_tokens: 100, output_tokens: 100 },
-    });
+    mockMessagesCreate.mockResolvedValue(makeOpenAIResponse({
+      concept_updates: [],
+      new_skills: [],
+      contradictions: [],
+      entity_updates: [],
+      overall_assessment: "B+: all good",
+      // candidate_dismissals intentionally omitted
+    }));
 
     const { runReflection } = await import("../../src/consolidate/reflect.js");
     const result = await runReflection({ triggerSource: "test", dryRun: false });

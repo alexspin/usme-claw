@@ -2,11 +2,13 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // ── Mock dependencies before importing the module ──────────
 
-vi.mock("@anthropic-ai/sdk", () => {
+vi.mock("openai", () => {
   return {
     default: vi.fn().mockImplementation(() => ({
-      messages: {
-        create: vi.fn(),
+      chat: {
+        completions: {
+          create: vi.fn(),
+        },
       },
     })),
   };
@@ -31,22 +33,28 @@ vi.mock("../logger.js", () => ({
 
 // Set required env vars before importing
 process.env.DATABASE_URL = "postgres://test:test@localhost:5432/test";
-process.env.ANTHROPIC_API_KEY = "test-key";
+process.env.OPENAI_API_KEY = "test-key";
 
 import { runGraphBuilder } from "../graph-builder.js";
 import { Pool } from "pg";
-import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 
 // ── Helpers ────────────────────────────────────────────────
 
 function makeToolResponse(relationships: object[]) {
   return {
-    content: [{
-      type: "tool_use",
-      name: "graph_output",
-      input: { relationships },
+    choices: [{
+      message: {
+        tool_calls: [{
+          type: "function",
+          function: {
+            name: "graph_output",
+            arguments: JSON.stringify({ relationships }),
+          },
+        }],
+      },
     }],
-    usage: { input_tokens: 100, output_tokens: 50 },
+    usage: { prompt_tokens: 100, completion_tokens: 50 },
   };
 }
 
@@ -89,14 +97,14 @@ describe("runGraphBuilder", () => {
     const { poolInstance, dbClient } = makePoolMock(entities, [], []);
     (Pool as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => poolInstance);
 
-    const anthropicInstance = new (Anthropic as unknown as ReturnType<typeof vi.fn>)();
-    (anthropicInstance.messages.create as ReturnType<typeof vi.fn>).mockResolvedValue(
+    const openaiInstance = new (OpenAI as unknown as ReturnType<typeof vi.fn>)();
+    (openaiInstance.chat.completions.create as ReturnType<typeof vi.fn>).mockResolvedValue(
       makeToolResponse([
         { source_slug: "alex", relationship: "manages", target_slug: "usme-claw", confidence: 0.9 },
         { source_slug: "rufus", relationship: "uses", target_slug: "usme-claw", confidence: 0.8 },
       ]),
     );
-    (Anthropic as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => anthropicInstance);
+    (OpenAI as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => openaiInstance);
 
     const result = await runGraphBuilder({ triggerSource: "test" });
 
@@ -114,14 +122,14 @@ describe("runGraphBuilder", () => {
     const { poolInstance, dbClient } = makePoolMock(entities, [], []);
     (Pool as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => poolInstance);
 
-    const anthropicInstance = new (Anthropic as unknown as ReturnType<typeof vi.fn>)();
-    (anthropicInstance.messages.create as ReturnType<typeof vi.fn>).mockResolvedValue(
+    const openaiInstance = new (OpenAI as unknown as ReturnType<typeof vi.fn>)();
+    (openaiInstance.chat.completions.create as ReturnType<typeof vi.fn>).mockResolvedValue(
       makeToolResponse([
         // source_slug "unknown-entity" is not in the batch index
         { source_slug: "unknown-entity", relationship: "uses", target_slug: "alex", confidence: 0.7 },
       ]),
     );
-    (Anthropic as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => anthropicInstance);
+    (OpenAI as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => openaiInstance);
 
     const result = await runGraphBuilder({ triggerSource: "test" });
     expect(result.relationshipsWritten).toBe(0);
@@ -144,14 +152,14 @@ describe("runGraphBuilder", () => {
     const { poolInstance } = makePoolMock(entities, [], [], dbClient);
     (Pool as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => poolInstance);
 
-    const anthropicInstance = new (Anthropic as unknown as ReturnType<typeof vi.fn>)();
-    (anthropicInstance.messages.create as ReturnType<typeof vi.fn>).mockResolvedValue(
+    const openaiInstance = new (OpenAI as unknown as ReturnType<typeof vi.fn>)();
+    (openaiInstance.chat.completions.create as ReturnType<typeof vi.fn>).mockResolvedValue(
       makeToolResponse([
         // target_slug "some-tool" not in batch but exists in DB
         { source_slug: "alex", relationship: "uses", target_slug: "some-tool", confidence: 0.75 },
       ]),
     );
-    (Anthropic as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => anthropicInstance);
+    (OpenAI as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => openaiInstance);
 
     const result = await runGraphBuilder({ triggerSource: "test" });
     expect(result.relationshipsWritten).toBe(1);
@@ -174,13 +182,13 @@ describe("runGraphBuilder", () => {
     const { poolInstance } = makePoolMock(entities, [], [], dbClient);
     (Pool as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => poolInstance);
 
-    const anthropicInstance = new (Anthropic as unknown as ReturnType<typeof vi.fn>)();
-    (anthropicInstance.messages.create as ReturnType<typeof vi.fn>).mockResolvedValue(
+    const openaiInstance = new (OpenAI as unknown as ReturnType<typeof vi.fn>)();
+    (openaiInstance.chat.completions.create as ReturnType<typeof vi.fn>).mockResolvedValue(
       makeToolResponse([
         { source_slug: "alex", relationship: "uses", target_slug: "nonexistent-thing", confidence: 0.6 },
       ]),
     );
-    (Anthropic as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => anthropicInstance);
+    (OpenAI as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => openaiInstance);
 
     const result = await runGraphBuilder({ triggerSource: "test" });
     expect(result.relationshipsWritten).toBe(0);
@@ -195,13 +203,13 @@ describe("runGraphBuilder", () => {
     const { poolInstance, dbClient } = makePoolMock(entities, [], []);
     (Pool as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => poolInstance);
 
-    const anthropicInstance = new (Anthropic as unknown as ReturnType<typeof vi.fn>)();
-    (anthropicInstance.messages.create as ReturnType<typeof vi.fn>).mockResolvedValue(
+    const openaiInstance = new (OpenAI as unknown as ReturnType<typeof vi.fn>)();
+    (openaiInstance.chat.completions.create as ReturnType<typeof vi.fn>).mockResolvedValue(
       makeToolResponse([
         { source_slug: "alex", relationship: "manages", target_slug: "usme-claw", confidence: 0.9 },
       ]),
     );
-    (Anthropic as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => anthropicInstance);
+    (OpenAI as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => openaiInstance);
 
     const result = await runGraphBuilder({ triggerSource: "test", dryRun: true });
 
@@ -219,9 +227,9 @@ describe("runGraphBuilder", () => {
     const { poolInstance } = makePoolMock(entities, [], []);
     (Pool as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => poolInstance);
 
-    const anthropicInstance = new (Anthropic as unknown as ReturnType<typeof vi.fn>)();
-    (anthropicInstance.messages.create as ReturnType<typeof vi.fn>).mockResolvedValue(makeToolResponse([]));
-    (Anthropic as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => anthropicInstance);
+    const openaiInstance = new (OpenAI as unknown as ReturnType<typeof vi.fn>)();
+    (openaiInstance.chat.completions.create as ReturnType<typeof vi.fn>).mockResolvedValue(makeToolResponse([]));
+    (OpenAI as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => openaiInstance);
 
     // Just verify it completes without error (logging is mocked)
     await expect(runGraphBuilder({ triggerSource: "test", dryRun: true })).resolves.toBeDefined();

@@ -68,6 +68,20 @@ export interface UsmePluginConfig {
   spreading: SpreadingConfig;
 }
 
+type DottedDbConfig = {
+  "db.host"?: DbConfig["host"];
+  "db.port"?: DbConfig["port"];
+  "db.database"?: DbConfig["database"];
+  "db.user"?: DbConfig["user"];
+  "db.password"?: DbConfig["password"];
+  "db.poolMax"?: DbConfig["poolMax"];
+  "db.idleTimeoutMs"?: DbConfig["idleTimeoutMs"];
+};
+
+export type UsmePluginConfigInput = Omit<Partial<UsmePluginConfig>, "db"> & {
+  db?: Partial<DbConfig>;
+} & DottedDbConfig;
+
 export const DEFAULT_CONFIG: UsmePluginConfig = {
   mode: "log-only",
   db: {
@@ -108,13 +122,32 @@ export const DEFAULT_CONFIG: UsmePluginConfig = {
   },
 };
 
+function normalizeDbConfig(partial: UsmePluginConfigInput): Partial<DbConfig> {
+  const db = { ...(partial.db ?? {}) };
+
+  // OpenClaw manifests use dotted keys. Apply them after nested db so explicit
+  // dotted manifest values win predictably when both representations appear.
+  if (partial["db.host"] !== undefined) db.host = partial["db.host"];
+  if (partial["db.port"] !== undefined) db.port = partial["db.port"];
+  if (partial["db.database"] !== undefined) db.database = partial["db.database"];
+  if (partial["db.user"] !== undefined) db.user = partial["db.user"];
+  if (partial["db.password"] !== undefined) db.password = partial["db.password"];
+  if (partial["db.poolMax"] !== undefined) db.poolMax = partial["db.poolMax"];
+  if (partial["db.idleTimeoutMs"] !== undefined) {
+    db.idleTimeoutMs = partial["db.idleTimeoutMs"];
+  }
+
+  return db;
+}
+
 export function resolveConfig(
-  partial?: Partial<UsmePluginConfig>,
+  partial?: UsmePluginConfigInput,
 ): UsmePluginConfig {
   if (!partial) return { ...DEFAULT_CONFIG };
+  const db = normalizeDbConfig(partial);
   return {
     mode: partial.mode ?? DEFAULT_CONFIG.mode,
-    db: { ...DEFAULT_CONFIG.db, ...partial.db },
+    db: { ...DEFAULT_CONFIG.db, ...db },
     extraction: {
       ...DEFAULT_CONFIG.extraction,
       ...partial.extraction,

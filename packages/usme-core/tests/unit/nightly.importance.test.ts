@@ -2,21 +2,21 @@
  * Tests for stepEpisodify importance_score assignment.
  *
  * Verifies:
- *   - Haiku tool_use result populates importance_score in the DB insert
- *   - Haiku call failure defaults importance_score to 5
+ *   - fast-model tool_call result populates importance_score in the DB insert
+ *   - fast-model call failure defaults importance_score to 5
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Mock } from "vitest";
 
-// ── Mock @anthropic-ai/sdk ────────────────────────────────────────────────────
+// ── Mock openai ────────────────────────────────────────────────────────────
 
-const mockMessagesCreate = vi.fn();
+const mockChatCompletionsCreate = vi.fn();
 
-vi.mock("@anthropic-ai/sdk", () => {
+vi.mock("openai", () => {
   return {
     default: vi.fn().mockImplementation(() => ({
-      messages: { create: mockMessagesCreate },
+      chat: { completions: { create: mockChatCompletionsCreate } },
     })),
   };
 });
@@ -67,24 +67,28 @@ function makeTrace(id: string, sessionId = "sess-1") {
   };
 }
 
-/** Build a mock Anthropic response that looks like a successful tool_use block. */
+/** Build a mock OpenAI response that looks like a plain-text completion. */
 function makeSummaryResponse(text: string): unknown {
   return {
-    content: [{ type: "text", text }],
-    usage: { input_tokens: 10, output_tokens: 10 },
+    choices: [{ message: { content: text } }],
+    usage: { prompt_tokens: 10, completion_tokens: 10 },
   };
 }
 
 function makeImportanceResponse(score: number): unknown {
   return {
-    content: [
-      {
-        type: "tool_use",
-        name: "assign_importance",
-        input: { importance_score: score },
+    choices: [{
+      message: {
+        tool_calls: [{
+          type: "function",
+          function: {
+            name: "assign_importance",
+            arguments: JSON.stringify({ importance_score: score }),
+          },
+        }],
       },
-    ],
-    usage: { input_tokens: 5, output_tokens: 5 },
+    }],
+    usage: { prompt_tokens: 5, completion_tokens: 5 },
   };
 }
 
@@ -97,20 +101,20 @@ describe("stepEpisodify — importance_score", () => {
     mockMarkTracesEpisodified.mockResolvedValue(undefined);
   });
 
-  it("writes importance_score=8 when Haiku returns 8", async () => {
+  it("writes importance_score=8 when the fast model returns 8", async () => {
     mockGetUnepisodifiedTraces.mockResolvedValue([makeTrace("t1")]);
 
-    // First call: episode summary (Sonnet) → plain text response
-    mockMessagesCreate
+    // First call: episode summary (reasoning model) → plain text response
+    mockChatCompletionsCreate
       .mockResolvedValueOnce(makeSummaryResponse("Test episode summary"))
-      // Second call: importance scoring (Haiku) → tool_use with score 8
+      // Second call: importance scoring (fast model) → tool call with score 8
       .mockResolvedValueOnce(makeImportanceResponse(8));
 
     // Import after mocks are set up
-    const Anthropic = (await import("@anthropic-ai/sdk")).default;
+    const OpenAI = (await import("openai")).default;
     const { stepEpisodify } = await import("../../src/consolidate/nightly.js");
 
-    const client = new Anthropic({ apiKey: "test" });
+    const client = new OpenAI({ apiKey: "test" });
     const mockPool = {
       query: vi.fn(),
     } as any;
@@ -123,19 +127,19 @@ describe("stepEpisodify — importance_score", () => {
     expect(callArgs.importance_score).toBe(8);
   });
 
-  it("defaults to importance_score=5 when Haiku call throws", async () => {
+  it("defaults to importance_score=5 when the fast model call throws", async () => {
     mockGetUnepisodifiedTraces.mockResolvedValue([makeTrace("t2")]);
 
     // First call: summary succeeds
-    mockMessagesCreate
+    mockChatCompletionsCreate
       .mockResolvedValueOnce(makeSummaryResponse("Another episode"))
-      // Second call: Haiku throws
-      .mockRejectedValueOnce(new Error("Haiku API error"));
+      // Second call: fast model throws
+      .mockRejectedValueOnce(new Error("fast model API error"));
 
-    const Anthropic = (await import("@anthropic-ai/sdk")).default;
+    const OpenAI = (await import("openai")).default;
     const { stepEpisodify } = await import("../../src/consolidate/nightly.js");
 
-    const client = new Anthropic({ apiKey: "test" });
+    const client = new OpenAI({ apiKey: "test" });
     const mockPool = { query: vi.fn() } as any;
 
     await stepEpisodify(client, mockPool, {});
@@ -148,16 +152,16 @@ describe("stepEpisodify — importance_score", () => {
   it("returns 0 when no un-episodified traces exist", async () => {
     mockGetUnepisodifiedTraces.mockResolvedValue([]);
 
-    const Anthropic = (await import("@anthropic-ai/sdk")).default;
+    const OpenAI = (await import("openai")).default;
     const { stepEpisodify } = await import("../../src/consolidate/nightly.js");
 
-    const client = new Anthropic({ apiKey: "test" });
+    const client = new OpenAI({ apiKey: "test" });
     const mockPool = { query: vi.fn() } as any;
 
     const result = await stepEpisodify(client, mockPool, {});
 
     expect(result).toBe(0);
     expect(mockInsertEpisode).not.toHaveBeenCalled();
-    expect(mockMessagesCreate).not.toHaveBeenCalled();
+    expect(mockChatCompletionsCreate).not.toHaveBeenCalled();
   });
 });

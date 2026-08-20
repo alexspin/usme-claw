@@ -8,13 +8,13 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-// ── Mock @anthropic-ai/sdk ────────────────────────────────────────────────────
+// ── Mock openai ────────────────────────────────────────────────────────────
 
-const mockMessagesCreate = vi.fn();
+const mockChatCompletionsCreate = vi.fn();
 
-vi.mock("@anthropic-ai/sdk", () => ({
+vi.mock("openai", () => ({
   default: vi.fn().mockImplementation(() => ({
-    messages: { create: mockMessagesCreate },
+    chat: { completions: { create: mockChatCompletionsCreate } },
   })),
 }));
 
@@ -64,10 +64,10 @@ describe("stepSkillDraft — no-op stub (superseded by reflect.ts)", () => {
   it("returns 0 (no-op stub — skill candidate production moved to reflect.ts)", async () => {
     const mockQueryFn = vi.fn();
 
-    const Anthropic = (await import("@anthropic-ai/sdk")).default;
+    const OpenAI = (await import("openai")).default;
     const { stepSkillDraft } = await import("../../src/consolidate/nightly.js");
 
-    const client = new Anthropic({ apiKey: "test" });
+    const client = new OpenAI({ apiKey: "test" });
     const mockPool = { query: mockQueryFn } as any;
 
     const result = await stepSkillDraft(client, mockPool, {});
@@ -78,27 +78,27 @@ describe("stepSkillDraft — no-op stub (superseded by reflect.ts)", () => {
   it("makes no DB calls (no-op stub)", async () => {
     const mockQueryFn = vi.fn();
 
-    const Anthropic = (await import("@anthropic-ai/sdk")).default;
+    const OpenAI = (await import("openai")).default;
     const { stepSkillDraft } = await import("../../src/consolidate/nightly.js");
 
-    const client = new Anthropic({ apiKey: "test" });
+    const client = new OpenAI({ apiKey: "test" });
     const mockPool = { query: mockQueryFn } as any;
 
     await stepSkillDraft(client, mockPool, {});
 
     expect(mockQueryFn).not.toHaveBeenCalled();
-    expect(mockMessagesCreate).not.toHaveBeenCalled();
+    expect(mockChatCompletionsCreate).not.toHaveBeenCalled();
   });
 
   it("does not call LLM (no-op stub)", async () => {
-    const Anthropic = (await import("@anthropic-ai/sdk")).default;
+    const OpenAI = (await import("openai")).default;
     const { stepSkillDraft } = await import("../../src/consolidate/nightly.js");
 
-    const client = new Anthropic({ apiKey: "test" });
+    const client = new OpenAI({ apiKey: "test" });
     const mockPool = { query: vi.fn() } as any;
 
     await stepSkillDraft(client, mockPool, {});
 
-    expect(mockMessagesCreate).not.toHaveBeenCalled();
+    expect(mockChatCompletionsCreate).not.toHaveBeenCalled();
   });
 });
