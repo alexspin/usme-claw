@@ -5,3 +5,6 @@
 .claude-flow/
 .swarm/
 .env
+
+# CodeGraph local index
+.codegraph/
